@@ -72,6 +72,9 @@ tinykeys(window, {
 		isPaused = !isPaused;
 		showInfo(isPaused ? 'Paused' : 'Playing');
 	},
+	'Shift+Space': () => {
+		animationDirection *= -1;
+	},
 	'Shift+?': () => {
 		instructionsContainer.classList.toggle('show');
 	},
@@ -84,6 +87,7 @@ let exponent = 2;
 let cReal = -0.7;
 let cImaginary = -0.5;
 let isPaused = true;
+let animationDirection = 1;
 
 const instructionsContainer = document.getElementById('instructions');
 instructionsContainer.querySelector('button').addEventListener('click', () => {
@@ -253,8 +257,7 @@ function render(time) {
 	// Pass data to the fragment shader.
 	setUniforms(fragmentShaderInfo, {
 		u_resolution: [gl.canvas.width, gl.canvas.height],
-		u_frame: time / 62.5, // 16 fps.
-		u_isPaused: isPaused,
+		u_frame: isPaused ? 0 : colors.length + (((time * animationDirection) / 62.5) % colors.length), // 16 fps.
 		u_center: smoothedCenterPosition,
 		u_zoom: zoom,
 		u_exponent: exponent,

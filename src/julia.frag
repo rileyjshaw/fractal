@@ -3,7 +3,6 @@ precision highp float;
 
 uniform vec2 u_resolution;
 uniform int u_frame;
-uniform bool u_isPaused;
 uniform vec2 u_center;
 uniform float u_zoom;
 uniform int u_exponent;
@@ -54,7 +53,7 @@ void main() {
 	vec2 centeredCoords = (normalizedCoords / u_zoom + u_center) * 2.0;
 
 	int nIterations = iterateJulia(centeredCoords, vec2(u_cReal, u_cImaginary));
-	int colorIdx = nIterations == 0 ? 0 : (nIterations + (u_isPaused ? 0 : u_frame)) % 8;
+	int colorIdx = nIterations == 0 ? 0 : (nIterations + u_frame) % 8;
 	vec3 color = u_colors[colorIdx];
 	FragColor = vec4(color.rgb, 1.0);
 }
