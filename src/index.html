@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Mandelbrot GPU</title>
+	</head>
+	<body>
+		<canvas id="canvas"></canvas>
+		<div id="instructions" class="show">
+			<div>
+				<h1>Mandelbrot Set Explorer (GPU Edition)</h1>
+				<p>
+					This is a mandelbrot set explorer running as a shader on your GPU. The controls require a keyboard
+					and mouse.
+				</p>
+				<p>
+					It’s a naive implementation that doesn’t allow for arbitrary precision. This means that it loses
+					resolution at a relatively shallow zoom depth of ~100000x.
+				</p>
+				<p>
+					If you take any cool screenshots, feel free to share them with me. I love seeing how people use
+					tools like this.
+				</p>
+				<h2>Controls</h2>
+				<ul>
+					<li>Click: set the image center</li>
+					<li>Scroll: zoom in / out</li>
+					<!-- <li><kbd>C</kbd>: Increment color palette (decrement with <kbd>Shift</kbd> + <kbd>C</kbd>)</li> -->
+					<li><kbd>D</kbd>: Increase pixel density (decrease with <kbd>Shift</kbd> + <kbd>D</kbd>)</li>
+					<li><kbd>E</kbd>: Increase set exponent (decrease with <kbd>Shift</kbd> + <kbd>E</kbd>)</li>
+					<li><kbd>Space</kbd>: Pause / play simulation</li>
+					<li><kbd>?</kbd>: Show this info pane</li>
+					<li><kbd>Esc</kbd>: Hide this info pane</li>
+				</ul>
+				<p>
+					Note: not everything is configurable from this interface. To make deeper tweaks, follow
+					<a href="https://github.com/rileyjshaw/mandelbrot">the README</a>
+					and start running the code locally.
+				</p>
+				<button>Get started</button>
+			</div>
+		</div>
+		<div id="error">!</div>
+		<div id="info"></div>
+		<script type="module" src="/main.js"></script>
+	</body>
+</html>
