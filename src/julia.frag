@@ -5,13 +5,14 @@ uniform vec2 u_resolution;
 uniform vec2 u_center;
 uniform float u_zoom;
 uniform int u_exponent;
-// TODO: Use this.
-// uniform vec3 u_colors[8];
+uniform float u_cReal;
+uniform float u_cImaginary;
+uniform vec3 u_colors[8];
 
 in vec2 v_texCoord;
 out vec4 FragColor;
 
-int maxIterations = 512;
+int maxIterations = 128;
 
 // Takes a complex number as a vector (real, imaginary) and returns the square.
 vec2 squareComplexNumber(vec2 n) {
@@ -34,10 +35,10 @@ vec2 cpow(vec2 z, int n) {
 	return sum;
 }
 
-int iterateMandelbrot(vec2 coord){
-	vec2 z = vec2(0.0);
+int iterateJulia(vec2 coord, vec2 c) {
+	vec2 z = coord;
 	for(int i = 0; i < maxIterations; i++) {
-		z = cpow(z, u_exponent) + coord;
+		z = cpow(z, u_exponent) + c;
 		if (length(z) > 2.0) return i;
 	}
 	return maxIterations;
@@ -50,7 +51,13 @@ void main() {
 	// Center and zoom.
 	vec2 centeredCoords = (normalizedCoords / u_zoom + u_center) * 2.0;
 
-	int nIterations = iterateMandelbrot(centeredCoords);
-	float shade = 1.0 - sqrt(float(nIterations) / float(maxIterations));
-	FragColor = vec4(shade, shade, shade, 1.0);
+	int nIterations = iterateJulia(centeredCoords, vec2(u_cReal, u_cImaginary));
+	float shade = 1.0 - pow(float(nIterations) / float(maxIterations), 0.25);
+	vec3 color;
+	// if (mod(shade, 0.1) < 0.04) {
+		// color = vec3(0.0);
+	// } else {
+		color = u_colors[nIterations % 8];
+	// }
+	FragColor = vec4(color.rgb, 1.0);
 }

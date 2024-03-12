@@ -6,6 +6,6 @@ export default defineConfig({
 	build: {
 		outDir: '../dist',
 	},
-	base: '/mandelbrot/',
+	base: '/julia/',
 	plugins: [glsl()],
 });

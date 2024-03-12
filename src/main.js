@@ -10,16 +10,21 @@ import {
 import { tinykeys } from 'tinykeys';
 import { Tween, Easing } from '@tweenjs/tween.js';
 
+import palettes from './palettes';
+import { hexToNormalizedRGB } from './util';
+
 // Shaders.
 import vertexSource from './vertex.vert';
-import fragmentSource from './mandelbrot.frag';
+import fragmentSource from './julia.frag';
 
 import './style.css';
 
+const N_COLORS = 8;
+
 tinykeys(window, {
 	// Change colors.
-	// KeyC: () => updateColors(),
-	// 'Shift+KeyC': () => updateColors(-1),
+	KeyC: () => updateColors(),
+	'Shift+KeyC': () => updateColors(-1),
 	// Increase / decrease resolution density.
 	KeyD: () => {
 		resolutionMultiplier = Math.min(2, resolutionMultiplier * 2);
@@ -40,6 +45,28 @@ tinykeys(window, {
 		resetView();
 		showInfo(`Exponent: ${exponent}`);
 	},
+	// Increase / decrease imaginary component.
+	KeyI: () => {
+		cImaginary = Math.min(3, cImaginary + 0.1);
+		resetView();
+		showInfo(`C (imaginary): ${cImaginary}`);
+	},
+	'Shift+KeyI': () => {
+		cImaginary = Math.max(-3, cImaginary - 0.1);
+		resetView();
+		showInfo(`C (imaginary): ${cImaginary}`);
+	},
+	// Increase / decrease real component.
+	KeyR: () => {
+		cReal = Math.min(3, cReal + 0.1);
+		resetView();
+		showInfo(`C (real): ${cReal}`);
+	},
+	'Shift+KeyR': () => {
+		cReal = Math.max(-3, cReal - 0.1);
+		resetView();
+		showInfo(`C (real): ${cReal}`);
+	},
 	// Pause / play.
 	Space: () => {
 		isPaused = !isPaused;
@@ -54,6 +81,8 @@ tinykeys(window, {
 });
 
 let exponent = 2;
+let cReal = -0.7;
+let cImaginary = -0.5;
 
 const instructionsContainer = document.getElementById('instructions');
 instructionsContainer.querySelector('button').addEventListener('click', () => {
@@ -105,7 +134,7 @@ canvas.addEventListener('wheel', e => {
 });
 function resetView() {
 	zoom = 1;
-	centerPosition[0] = exponent === 2 ? -0.2 : 0;
+	centerPosition[0] = 0;
 	centerPosition[1] = 0;
 	centerTween.startFromCurrentValues();
 }
@@ -115,26 +144,26 @@ resetView();
 
 const fragmentShaderInfo = createProgramInfo(gl, [vertexSource, fragmentSource]);
 
-// let colors = new Float32Array(MAX_N_STATES * 3);
-// let nextPaletteIdx = Math.floor(Math.random() * palettes.length);
-// function updateColors(direction = 1) {
-// 	nextPaletteIdx = (palettes.length + nextPaletteIdx + direction) % palettes.length;
-// 	const normalizedPalette = palettes[nextPaletteIdx].map(hexToNormalizedRGB);
-// 	for (let i = 0; i < MAX_N_STATES; ++i) {
-// 		const rgbComponents = [...normalizedPalette[i % normalizedPalette.length]];
-// 		if (i >= normalizedPalette.length) {
-// 			// Add a small random offset to the RGB components for variety.
-// 			for (let j = 0; j < rgbComponents.length; ++j) {
-// 				rgbComponents[j] = Math.max(0, Math.min(1, rgbComponents[j] + Math.random() * 0.1 - 0.05));
-// 			}
-// 		}
-// 		const rIdx = i * 3;
-// 		colors[rIdx] = rgbComponents[0];
-// 		colors[rIdx + 1] = rgbComponents[1];
-// 		colors[rIdx + 2] = rgbComponents[2];
-// 	}
-// }
-// updateColors(0);
+let colors = new Float32Array(N_COLORS * 3);
+let nextPaletteIdx = 0;
+function updateColors(direction = 1) {
+	nextPaletteIdx = (palettes.length + nextPaletteIdx + direction) % palettes.length;
+	const normalizedPalette = palettes[nextPaletteIdx].map(hexToNormalizedRGB);
+	for (let i = 0; i < N_COLORS; ++i) {
+		const rgbComponents = [...normalizedPalette[i % normalizedPalette.length]];
+		if (i >= normalizedPalette.length) {
+			// Add a small random offset to the RGB components for variety.
+			for (let j = 0; j < rgbComponents.length; ++j) {
+				rgbComponents[j] = Math.max(0, Math.min(1, rgbComponents[j] + Math.random() * 0.1 - 0.05));
+			}
+		}
+		const rIdx = i * 3;
+		colors[rIdx] = rgbComponents[0];
+		colors[rIdx + 1] = rgbComponents[1];
+		colors[rIdx + 2] = rgbComponents[2];
+	}
+}
+updateColors(0);
 
 const arrays = {
 	position: {
@@ -195,7 +224,9 @@ function render(time) {
 		u_center: smoothedCenterPosition,
 		u_zoom: zoom,
 		u_exponent: exponent,
-		// u_colors: colors,
+		u_cReal: cReal,
+		u_cImaginary: cImaginary,
+		u_colors: colors,
 	});
 	drawBufferInfo(gl, bufferInfo, gl.TRIANGLE_STRIP);
 	requestAnimationFrame(render);

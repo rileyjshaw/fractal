@@ -3,15 +3,15 @@
 	<head>
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-		<title>Mandelbrot GPU</title>
+		<title>Julia Set GPU</title>
 	</head>
 	<body>
 		<canvas id="canvas"></canvas>
 		<div id="instructions" class="show">
 			<div>
-				<h1>Mandelbrot Set Explorer (GPU Edition)</h1>
+				<h1>Julia Set Explorer (GPU Edition)</h1>
 				<p>
-					This is a mandelbrot set explorer running as a shader on your GPU. The controls require a keyboard
+					This is a Julia set explorer running as a shader on your GPU. The full controls require a keyboard
 					and mouse.
 				</p>
 				<p>
@@ -26,7 +26,7 @@
 				<ul>
 					<li>Click: set the image center</li>
 					<li>Scroll: zoom in / out</li>
-					<!-- <li><kbd>C</kbd>: Increment color palette (decrement with <kbd>Shift</kbd> + <kbd>C</kbd>)</li> -->
+					<li><kbd>C</kbd>: Increment color palette (decrement with <kbd>Shift</kbd> + <kbd>C</kbd>)</li>
 					<li><kbd>D</kbd>: Increase pixel density (decrease with <kbd>Shift</kbd> + <kbd>D</kbd>)</li>
 					<li><kbd>E</kbd>: Increase set exponent (decrease with <kbd>Shift</kbd> + <kbd>E</kbd>)</li>
 					<li><kbd>Space</kbd>: Pause / play simulation</li>
@@ -35,10 +35,10 @@
 				</ul>
 				<p>
 					Note: not everything is configurable from this interface. To make deeper tweaks, follow
-					<a href="https://github.com/rileyjshaw/mandelbrot">the README</a>
+					<a href="https://github.com/rileyjshaw/julia">the README</a>
 					and start running the code locally.
 				</p>
-				<button>Get started</button>
+				<button autofocus>Get started</button>
 			</div>
 		</div>
 		<div id="error">!</div>
