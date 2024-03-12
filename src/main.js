@@ -132,6 +132,39 @@ canvas.addEventListener('wheel', e => {
 	const factor = 1 + Math.sign(e.deltaY) * 0.05;
 	zoom = Math.max(1, Math.min(100000, zoom * factor));
 });
+// Add pinch to zoom on mobile.
+let initialDistance = null;
+function getDistance(touches) {
+	const dx = touches[0].pageX - touches[1].pageX;
+	const dy = touches[0].pageY - touches[1].pageY;
+	return Math.sqrt(dx * dx + dy * dy);
+}
+canvas.addEventListener(
+	'touchstart',
+	e => {
+		if (e.touches.length === 2) {
+			e.preventDefault();
+			initialDistance = getDistance(e.touches);
+		}
+	},
+	{ passive: false },
+);
+canvas.addEventListener(
+	'touchmove',
+	e => {
+		if (e.touches.length === 2) {
+			e.preventDefault();
+			const distance = getDistance(e.touches);
+			const factor = distance / initialDistance;
+			zoom = Math.max(1, Math.min(100000, zoom * factor));
+			initialDistance = distance;
+		}
+	},
+	{ passive: false },
+);
+canvas.addEventListener('touchend', e => {
+	initialDistance = null;
+});
 function resetView() {
 	zoom = 1;
 	centerPosition[0] = 0;
