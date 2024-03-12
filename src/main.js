@@ -49,23 +49,23 @@ tinykeys(window, {
 	KeyI: () => {
 		cImaginary = Math.min(3, cImaginary + 0.1);
 		resetView();
-		showInfo(`C (imaginary): ${cImaginary}`);
+		showInfo(`C (imaginary): ${cImaginary.toFixed(1)}`);
 	},
 	'Shift+KeyI': () => {
 		cImaginary = Math.max(-3, cImaginary - 0.1);
 		resetView();
-		showInfo(`C (imaginary): ${cImaginary}`);
+		showInfo(`C (imaginary): ${cImaginary.toFixed(1)}`);
 	},
 	// Increase / decrease real component.
 	KeyR: () => {
 		cReal = Math.min(3, cReal + 0.1);
 		resetView();
-		showInfo(`C (real): ${cReal}`);
+		showInfo(`C (real): ${cReal.toFixed(1)}`);
 	},
 	'Shift+KeyR': () => {
 		cReal = Math.max(-3, cReal - 0.1);
 		resetView();
-		showInfo(`C (real): ${cReal}`);
+		showInfo(`C (real): ${cReal.toFixed(1)}`);
 	},
 	// Pause / play.
 	Space: () => {
@@ -83,6 +83,7 @@ tinykeys(window, {
 let exponent = 2;
 let cReal = -0.7;
 let cImaginary = -0.5;
+let isPaused = true;
 
 const instructionsContainer = document.getElementById('instructions');
 instructionsContainer.querySelector('button').addEventListener('click', () => {
@@ -241,10 +242,8 @@ function resize() {
 	}
 }
 
-let isPaused = false;
 function render(time) {
 	centerTween.update(time);
-	time /= 1000; // Convert time to seconds.
 	resize();
 
 	gl.bindFramebuffer(gl.FRAMEBUFFER, null); // Bind the default framebuffer (the screen).
@@ -254,6 +253,8 @@ function render(time) {
 	// Pass data to the fragment shader.
 	setUniforms(fragmentShaderInfo, {
 		u_resolution: [gl.canvas.width, gl.canvas.height],
+		u_frame: time / 62.5, // 16 fps.
+		u_isPaused: isPaused,
 		u_center: smoothedCenterPosition,
 		u_zoom: zoom,
 		u_exponent: exponent,
