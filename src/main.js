@@ -20,6 +20,7 @@ import fragmentSource from './julia.frag';
 import './style.css';
 
 const N_COLORS = 8;
+const MAX_ZOOM = 100000;
 
 tinykeys(window, {
 	// Change colors.
@@ -37,35 +38,40 @@ tinykeys(window, {
 	// Increase / decrease set exponent.
 	KeyE: () => {
 		exponent = Math.min(16, exponent + 1);
-		resetView();
 		showInfo(`Exponent: ${exponent}`);
 	},
 	'Shift+KeyE': () => {
 		exponent = Math.max(2, exponent - 1);
-		resetView();
 		showInfo(`Exponent: ${exponent}`);
 	},
 	// Increase / decrease imaginary component.
 	KeyI: () => {
 		cImaginary = Math.min(3, cImaginary + 0.1);
-		resetView();
 		showInfo(`C (imaginary): ${cImaginary.toFixed(1)}`);
 	},
 	'Shift+KeyI': () => {
 		cImaginary = Math.max(-3, cImaginary - 0.1);
-		resetView();
 		showInfo(`C (imaginary): ${cImaginary.toFixed(1)}`);
 	},
 	// Increase / decrease real component.
 	KeyR: () => {
 		cReal = Math.min(3, cReal + 0.1);
-		resetView();
 		showInfo(`C (real): ${cReal.toFixed(1)}`);
 	},
 	'Shift+KeyR': () => {
 		cReal = Math.max(-3, cReal - 0.1);
-		resetView();
 		showInfo(`C (real): ${cReal.toFixed(1)}`);
+	},
+	// Maximum zoom in / out.
+	KeyZ: () => {
+		zoomTween.stop();
+		zoom[0] = MAX_ZOOM;
+		zoomTween.easing(Easing.Quintic.In).startFromCurrentValues();
+	},
+	'Shift+KeyZ': () => {
+		zoomTween.stop();
+		zoom[0] = 1;
+		zoomTween.easing(Easing.Quintic.Out).startFromCurrentValues();
 	},
 	// Pause / play.
 	Space: () => {
@@ -119,7 +125,8 @@ const canvas = document.getElementById('canvas');
 const gl = canvas.getContext('webgl2', { antialias: false });
 gl.imageSmoothingEnabled = false;
 
-let zoom = 1;
+const smoothedZoom = [1];
+const zoom = [...smoothedZoom];
 const smoothedCenterPosition = [0, 0];
 const centerPosition = [...smoothedCenterPosition];
 canvas.addEventListener('click', e => {
@@ -128,14 +135,15 @@ canvas.addEventListener('click', e => {
 	const y = e.clientY - top;
 	const normalizedX = (x / width) * 2 - 1;
 	const normalizedY = -((y / height) * 2 - 1); // Flip y to match WebGL orientation.
-	centerPosition[0] = smoothedCenterPosition[0] + normalizedX / zoom;
-	centerPosition[1] = smoothedCenterPosition[1] + normalizedY / zoom;
 	centerTween.stop();
+	centerPosition[0] = smoothedCenterPosition[0] + normalizedX / smoothedZoom[0];
+	centerPosition[1] = smoothedCenterPosition[1] + normalizedY / smoothedZoom[0];
 	centerTween.startFromCurrentValues();
 });
 canvas.addEventListener('wheel', e => {
 	const factor = 1 + Math.sign(e.deltaY) * 0.05;
-	zoom = Math.max(1, Math.min(100000, zoom * factor));
+	zoomTween.stop();
+	zoom[0] = smoothedZoom[0] = Math.max(1, Math.min(MAX_ZOOM, smoothedZoom[0] * factor));
 });
 // Add pinch to zoom on mobile.
 let initialDistance = null;
@@ -161,7 +169,8 @@ canvas.addEventListener(
 			e.preventDefault();
 			const distance = getDistance(e.touches);
 			const factor = distance / initialDistance;
-			zoom = Math.max(1, Math.min(100000, zoom * factor));
+			zoomTween.stop();
+			zoom[0] = smoothedZoom[0] = Math.max(1, Math.min(MAX_ZOOM, smoothedZoom[0] * factor));
 			initialDistance = distance;
 		}
 	},
@@ -170,15 +179,9 @@ canvas.addEventListener(
 canvas.addEventListener('touchend', e => {
 	initialDistance = null;
 });
-function resetView() {
-	zoom = 1;
-	centerPosition[0] = 0;
-	centerPosition[1] = 0;
-	centerTween.startFromCurrentValues();
-}
 const centerTween = new Tween(smoothedCenterPosition);
 centerTween.dynamic(true).to(centerPosition, 1000).easing(Easing.Quadratic.InOut);
-resetView();
+const zoomTween = new Tween(smoothedZoom).dynamic(true).to(zoom, 16000);
 
 const fragmentShaderInfo = createProgramInfo(gl, [vertexSource, fragmentSource]);
 
@@ -248,8 +251,8 @@ function resize() {
 
 function render(time) {
 	centerTween.update(time);
+	zoomTween.update(time);
 	resize();
-
 	gl.bindFramebuffer(gl.FRAMEBUFFER, null); // Bind the default framebuffer (the screen).
 	gl.useProgram(fragmentShaderInfo.program);
 	setBuffersAndAttributes(gl, fragmentShaderInfo, bufferInfo);
@@ -259,7 +262,7 @@ function render(time) {
 		u_resolution: [gl.canvas.width, gl.canvas.height],
 		u_frame: isPaused ? 0 : colors.length + (((time * animationDirection) / 62.5) % colors.length), // 16 fps.
 		u_center: smoothedCenterPosition,
-		u_zoom: zoom,
+		u_zoom: smoothedZoom[0],
 		u_exponent: exponent,
 		u_cReal: cReal,
 		u_cImaginary: cImaginary,
