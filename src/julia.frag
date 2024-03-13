@@ -1,6 +1,8 @@
 #version 300 es
 precision highp float;
 
+#define N_COLORS 32
+
 uniform vec2 u_resolution;
 uniform int u_frame;
 uniform vec2 u_center;
@@ -8,12 +10,12 @@ uniform float u_zoom;
 uniform int u_exponent;
 uniform float u_cReal;
 uniform float u_cImaginary;
-uniform vec3 u_colors[8];
+uniform vec3 u_colors[N_COLORS];
 
 in vec2 v_texCoord;
 out vec4 FragColor;
 
-int maxIterations = 128;
+int maxIterations = 256;
 
 // Takes a complex number as a vector (real, imaginary) and returns the square.
 vec2 squareComplexNumber(vec2 n) {
@@ -53,7 +55,7 @@ void main() {
 	vec2 centeredCoords = (normalizedCoords / u_zoom + u_center) * 2.0;
 
 	int nIterations = iterateJulia(centeredCoords, vec2(u_cReal, u_cImaginary));
-	int colorIdx = nIterations == 0 ? 0 : (nIterations + u_frame) % 8;
+	int colorIdx = (nIterations == 0 || nIterations == maxIterations) ? 0 : (nIterations + u_frame) % N_COLORS;
 	vec3 color = u_colors[colorIdx];
 	FragColor = vec4(color.rgb, 1.0);
 }

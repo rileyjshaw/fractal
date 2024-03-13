@@ -19,8 +19,13 @@ import fragmentSource from './julia.frag';
 
 import './style.css';
 
-const N_COLORS = 8;
-const MAX_ZOOM = 100000;
+const N_COLORS = 32;
+const MIN_ZOOM = 1;
+const MAX_ZOOM = 98304;
+
+// Derived.
+const MIN_ZOOM_EXPONENT = Math.log(MIN_ZOOM) / Math.log(2);
+const MAX_ZOOM_EXPONENT = Math.log(MAX_ZOOM) / Math.log(2);
 
 tinykeys(window, {
 	// Change colors.
@@ -46,32 +51,39 @@ tinykeys(window, {
 	},
 	// Increase / decrease imaginary component.
 	KeyI: () => {
-		cImaginary = Math.min(3, cImaginary + 0.1);
-		showInfo(`C (imaginary): ${cImaginary.toFixed(1)}`);
+		cImaginary = Math.min(3, cImaginary + 0.01);
+		showInfo(`C (imaginary): ${cImaginary.toFixed(2)}`);
 	},
 	'Shift+KeyI': () => {
-		cImaginary = Math.max(-3, cImaginary - 0.1);
-		showInfo(`C (imaginary): ${cImaginary.toFixed(1)}`);
+		cImaginary = Math.max(-3, cImaginary - 0.01);
+		showInfo(`C (imaginary): ${cImaginary.toFixed(2)}`);
+	},
+	// Reset center to origin.
+	KeyO: () => {
+		centerTween.stop();
+		centerPosition[0] = 0;
+		centerPosition[1] = 0;
+		centerTween.startFromCurrentValues();
 	},
 	// Increase / decrease real component.
 	KeyR: () => {
-		cReal = Math.min(3, cReal + 0.1);
-		showInfo(`C (real): ${cReal.toFixed(1)}`);
+		cReal = Math.min(3, cReal + 0.01);
+		showInfo(`C (real): ${cReal.toFixed(2)}`);
 	},
 	'Shift+KeyR': () => {
-		cReal = Math.max(-3, cReal - 0.1);
-		showInfo(`C (real): ${cReal.toFixed(1)}`);
+		cReal = Math.max(-3, cReal - 0.01);
+		showInfo(`C (real): ${cReal.toFixed(2)}`);
 	},
 	// Maximum zoom in / out.
 	KeyZ: () => {
 		zoomTween.stop();
-		zoom[0] = MAX_ZOOM;
-		zoomTween.easing(Easing.Quintic.In).startFromCurrentValues();
+		zoom[0] = MAX_ZOOM_EXPONENT;
+		zoomTween.startFromCurrentValues();
 	},
 	'Shift+KeyZ': () => {
 		zoomTween.stop();
-		zoom[0] = 1;
-		zoomTween.easing(Easing.Quintic.Out).startFromCurrentValues();
+		zoom[0] = MIN_ZOOM_EXPONENT;
+		zoomTween.startFromCurrentValues();
 	},
 	// Pause / play.
 	Space: () => {
@@ -90,8 +102,8 @@ tinykeys(window, {
 });
 
 let exponent = 2;
-let cReal = -0.7;
-let cImaginary = -0.5;
+let cReal = -0.71;
+let cImaginary = -0.43;
 let isPaused = true;
 let animationDirection = 1;
 
@@ -125,7 +137,7 @@ const canvas = document.getElementById('canvas');
 const gl = canvas.getContext('webgl2', { antialias: false });
 gl.imageSmoothingEnabled = false;
 
-const smoothedZoom = [1];
+const smoothedZoom = [MIN_ZOOM_EXPONENT];
 const zoom = [...smoothedZoom];
 const smoothedCenterPosition = [0, 0];
 const centerPosition = [...smoothedCenterPosition];
@@ -136,14 +148,14 @@ canvas.addEventListener('click', e => {
 	const normalizedX = (x / width) * 2 - 1;
 	const normalizedY = -((y / height) * 2 - 1); // Flip y to match WebGL orientation.
 	centerTween.stop();
-	centerPosition[0] = smoothedCenterPosition[0] + normalizedX / smoothedZoom[0];
-	centerPosition[1] = smoothedCenterPosition[1] + normalizedY / smoothedZoom[0];
+	centerPosition[0] = smoothedCenterPosition[0] + normalizedX / Math.pow(2, smoothedZoom[0]);
+	centerPosition[1] = smoothedCenterPosition[1] + normalizedY / Math.pow(2, smoothedZoom[0]);
 	centerTween.startFromCurrentValues();
 });
 canvas.addEventListener('wheel', e => {
-	const factor = 1 + Math.sign(e.deltaY) * 0.05;
+	const delta = Math.sign(e.deltaY) * 0.05;
 	zoomTween.stop();
-	zoom[0] = smoothedZoom[0] = Math.max(1, Math.min(MAX_ZOOM, smoothedZoom[0] * factor));
+	zoom[0] = smoothedZoom[0] = Math.max(MIN_ZOOM_EXPONENT, Math.min(MAX_ZOOM_EXPONENT, smoothedZoom[0] + delta));
 });
 // Add pinch to zoom on mobile.
 let initialDistance = null;
@@ -168,10 +180,15 @@ canvas.addEventListener(
 		if (e.touches.length === 2) {
 			e.preventDefault();
 			const distance = getDistance(e.touches);
-			const factor = distance / initialDistance;
+			const delta = distance / initialDistance;
 			zoomTween.stop();
-			zoom[0] = smoothedZoom[0] = Math.max(1, Math.min(MAX_ZOOM, smoothedZoom[0] * factor));
+			zoom[0] = smoothedZoom[0] = Math.max(
+				MIN_ZOOM_EXPONENT,
+				Math.min(MAX_ZOOM_EXPONENT, smoothedZoom[0] + delta),
+			);
 			initialDistance = distance;
+		} else if (e.scale !== 1) {
+			e.preventDefault();
 		}
 	},
 	{ passive: false },
@@ -181,7 +198,7 @@ canvas.addEventListener('touchend', e => {
 });
 const centerTween = new Tween(smoothedCenterPosition);
 centerTween.dynamic(true).to(centerPosition, 1000).easing(Easing.Quadratic.InOut);
-const zoomTween = new Tween(smoothedZoom).dynamic(true).to(zoom, 16000);
+const zoomTween = new Tween(smoothedZoom).dynamic(true).easing(Easing.Quadratic.InOut).to(zoom, 20000);
 
 const fragmentShaderInfo = createProgramInfo(gl, [vertexSource, fragmentSource]);
 
@@ -262,7 +279,7 @@ function render(time) {
 		u_resolution: [gl.canvas.width, gl.canvas.height],
 		u_frame: isPaused ? 0 : colors.length + (((time * animationDirection) / 62.5) % colors.length), // 16 fps.
 		u_center: smoothedCenterPosition,
-		u_zoom: smoothedZoom[0],
+		u_zoom: Math.pow(2, smoothedZoom[0]),
 		u_exponent: exponent,
 		u_cReal: cReal,
 		u_cImaginary: cImaginary,
