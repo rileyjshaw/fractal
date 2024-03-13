@@ -85,6 +85,43 @@ tinykeys(window, {
 		zoom[0] = MIN_ZOOM_EXPONENT;
 		zoomTween.startFromCurrentValues();
 	},
+	// Pan.
+	ArrowUp: () => {
+		centerTween.stop();
+		centerPosition[1] = smoothedCenterPosition[1] =
+			smoothedCenterPosition[1] + 0.005 / Math.pow(2, smoothedZoom[0]);
+	},
+	'Shift+ArrowUp': () => {
+		centerTween.stop();
+		centerPosition[1] = smoothedCenterPosition[1] = smoothedCenterPosition[1] + 0.05 / Math.pow(2, smoothedZoom[0]);
+	},
+	ArrowDown: () => {
+		centerTween.stop();
+		centerPosition[1] = smoothedCenterPosition[1] =
+			smoothedCenterPosition[1] - 0.005 / Math.pow(2, smoothedZoom[0]);
+	},
+	'Shift+ArrowDown': () => {
+		centerTween.stop();
+		centerPosition[1] = smoothedCenterPosition[1] = smoothedCenterPosition[1] - 0.05 / Math.pow(2, smoothedZoom[0]);
+	},
+	ArrowLeft: () => {
+		centerTween.stop();
+		centerPosition[0] = smoothedCenterPosition[0] =
+			smoothedCenterPosition[0] - 0.005 / Math.pow(2, smoothedZoom[0]);
+	},
+	'Shift+ArrowLeft': () => {
+		centerTween.stop();
+		centerPosition[0] = smoothedCenterPosition[0] = smoothedCenterPosition[0] - 0.05 / Math.pow(2, smoothedZoom[0]);
+	},
+	ArrowRight: () => {
+		centerTween.stop();
+		centerPosition[0] = smoothedCenterPosition[0] =
+			smoothedCenterPosition[0] + 0.005 / Math.pow(2, smoothedZoom[0]);
+	},
+	'Shift+ArrowRight': () => {
+		centerTween.stop();
+		centerPosition[0] = smoothedCenterPosition[0] = smoothedCenterPosition[0] + 0.05 / Math.pow(2, smoothedZoom[0]);
+	},
 	// Pause / play.
 	Space: () => {
 		isPaused = !isPaused;
