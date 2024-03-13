@@ -58,6 +58,13 @@ tinykeys(window, {
 		cImaginary = Math.max(-3, cImaginary - 0.01);
 		showInfo(`C (imaginary): ${cImaginary.toFixed(2)}`);
 	},
+	// Show / hide labels.
+	KeyL: () => {
+		showLabels = !showLabels;
+		if (showLabels) {
+			showInfo('Labels on');
+		}
+	},
 	// Reset center to origin.
 	KeyO: () => {
 		centerTween.stop();
@@ -85,7 +92,7 @@ tinykeys(window, {
 		zoom[0] = MIN_ZOOM_EXPONENT;
 		zoomTween.startFromCurrentValues();
 	},
-	// Pan.
+	// Pan position.
 	ArrowUp: () => {
 		centerTween.stop();
 		centerPosition[1] = smoothedCenterPosition[1] =
@@ -130,6 +137,7 @@ tinykeys(window, {
 	'Shift+Space': () => {
 		animationDirection *= -1;
 	},
+	// Show / hide instructions.
 	'Shift+?': () => {
 		instructionsContainer.classList.toggle('show');
 	},
@@ -143,6 +151,7 @@ let cReal = -0.71;
 let cImaginary = -0.43;
 let isPaused = true;
 let animationDirection = 1;
+let showLabels = true;
 
 const instructionsContainer = document.getElementById('instructions');
 instructionsContainer.querySelector('button').addEventListener('click', () => {
@@ -162,6 +171,8 @@ function showError() {
 let hideInfoTimeout;
 const infoContainer = document.getElementById('info');
 function showInfo(text) {
+	if (!showLabels) return;
+
 	clearTimeout(hideInfoTimeout);
 	infoContainer.textContent = text;
 	infoContainer.classList.add('show');
