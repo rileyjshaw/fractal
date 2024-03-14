@@ -70,8 +70,8 @@ tinykeys(window, {
 		zoomTween.stop();
 		positionTween.stop();
 		setState({ xPosition: 0, yPosition: 0, zoom: MIN_ZOOM_EXPONENT });
-		zoomTween.to([MIN_ZOOM_EXPONENT], 3000).startFromCurrentValues();
-		positionTween.to([0, 0], 2000).delay(2000).startFromCurrentValues();
+		zoomTween.to([MIN_ZOOM_EXPONENT], 500).startFromCurrentValues();
+		positionTween.to([0, 0], 2000).startFromCurrentValues();
 	},
 	// Increase / decrease real component.
 	KeyR: () => {
@@ -98,41 +98,57 @@ tinykeys(window, {
 		positionTween.stop();
 		setState({ yPosition: smoothedPosition[1] + 0.005 / Math.pow(2, smoothedZoom[0]) });
 		smoothedPosition[1] = state.yPosition;
+		// HACK(riley): Tween.js has a bug where stop() doesn’t work completely until the end is reached.
+		positionTween.to([state.xPosition, state.yPosition], 0).end();
 	},
 	'Shift+ArrowUp': () => {
 		positionTween.stop();
 		setState({ yPosition: smoothedPosition[1] + 0.05 / Math.pow(2, smoothedZoom[0]) });
 		smoothedPosition[1] = state.yPosition;
+		// HACK(riley): Tween.js has a bug where stop() doesn’t work completely until the end is reached.
+		positionTween.to([state.xPosition, state.yPosition], 0).end();
 	},
 	ArrowDown: () => {
 		positionTween.stop();
 		setState({ yPosition: smoothedPosition[1] - 0.005 / Math.pow(2, smoothedZoom[0]) });
 		smoothedPosition[1] = state.yPosition;
+		// HACK(riley): Tween.js has a bug where stop() doesn’t work completely until the end is reached.
+		positionTween.to([state.xPosition, state.yPosition], 0).end();
 	},
 	'Shift+ArrowDown': () => {
 		positionTween.stop();
 		setState({ yPosition: smoothedPosition[1] - 0.05 / Math.pow(2, smoothedZoom[0]) });
 		smoothedPosition[1] = state.yPosition;
+		// HACK(riley): Tween.js has a bug where stop() doesn’t work completely until the end is reached.
+		positionTween.to([state.xPosition, state.yPosition], 0).end();
 	},
 	ArrowLeft: () => {
 		positionTween.stop();
 		setState({ xPosition: smoothedPosition[0] - 0.005 / Math.pow(2, smoothedZoom[0]) });
 		smoothedPosition[0] = state.xPosition;
+		// HACK(riley): Tween.js has a bug where stop() doesn’t work completely until the end is reached.
+		positionTween.to([state.xPosition, state.yPosition], 0).end();
 	},
 	'Shift+ArrowLeft': () => {
 		positionTween.stop();
 		setState({ xPosition: smoothedPosition[0] - 0.05 / Math.pow(2, smoothedZoom[0]) });
 		smoothedPosition[0] = state.xPosition;
+		// HACK(riley): Tween.js has a bug where stop() doesn’t work completely until the end is reached.
+		positionTween.to([state.xPosition, state.yPosition], 0).end();
 	},
 	ArrowRight: () => {
 		positionTween.stop();
 		setState({ xPosition: smoothedPosition[0] + 0.005 / Math.pow(2, smoothedZoom[0]) });
 		smoothedPosition[0] = state.xPosition;
+		// HACK(riley): Tween.js has a bug where stop() doesn’t work completely until the end is reached.
+		positionTween.to([state.xPosition, state.yPosition], 0).end();
 	},
 	'Shift+ArrowRight': () => {
 		positionTween.stop();
 		setState({ xPosition: smoothedPosition[0] + 0.05 / Math.pow(2, smoothedZoom[0]) });
 		smoothedPosition[0] = state.xPosition;
+		// HACK(riley): Tween.js has a bug where stop() doesn’t work completely until the end is reached.
+		positionTween.to([state.xPosition, state.yPosition], 0).end();
 	},
 	// Pause / play.
 	Space: () => {
@@ -333,8 +349,8 @@ function resize() {
 }
 
 function render(time) {
-	positionTween.update(time);
-	zoomTween.update(time);
+	positionTween.update(time, false);
+	zoomTween.update(time, false);
 	resize();
 	gl.bindFramebuffer(gl.FRAMEBUFFER, null); // Bind the default framebuffer (the screen).
 	gl.useProgram(fragmentShaderInfo.program);
@@ -380,6 +396,8 @@ canvas.addEventListener('wheel', e => {
 	zoomTween.stop();
 	setState({ zoom: Math.max(MIN_ZOOM_EXPONENT, Math.min(MAX_ZOOM_EXPONENT, smoothedZoom[0] + delta)) });
 	smoothedZoom[0] = state.zoom;
+	// HACK(riley): Tween.js has a bug where stop() doesn’t work completely until the end is reached.
+	zoomTween.to([state.zoom], 0).end();
 });
 // Add pinch to zoom on mobile.
 let initialDistance = null;
@@ -408,6 +426,8 @@ canvas.addEventListener(
 			zoomTween.stop();
 			setState({ zoom: Math.max(MIN_ZOOM_EXPONENT, Math.min(MAX_ZOOM_EXPONENT, smoothedZoom[0] + delta)) });
 			smoothedZoom[0] = state.zoom;
+			// HACK(riley): Tween.js has a bug where stop() doesn’t work completely until the end is reached.
+			zoomTween.to([state.zoom], 0).end();
 			initialDistance = distance;
 		} else if (e.scale !== 1) {
 			e.preventDefault();
