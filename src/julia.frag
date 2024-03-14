@@ -48,8 +48,17 @@ int iterateJulia(vec2 coord, vec2 c) {
 }
 
 void main() {
-	// Normalize to [-1, 1].
+	float aspectRatio = u_resolution.x / u_resolution.y;
+
+	// Normalize to [-1, 1], adjusting to maintain a 1:1 aspect ratio.
 	vec2 normalizedCoords = (gl_FragCoord.xy / u_resolution) * 2.0 - 1.0;
+	if (aspectRatio > 1.0) {
+		// Landscape.
+		normalizedCoords.x *= aspectRatio;
+	} else {
+		// Portrait.
+		normalizedCoords.y /= aspectRatio;
+	}
 
 	// Center and zoom.
 	vec2 centeredCoords = (normalizedCoords / u_zoom + u_center) * 2.0;

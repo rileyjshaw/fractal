@@ -381,10 +381,18 @@ window.addEventListener('hashchange', updateStateFromHash);
 
 canvas.addEventListener('click', e => {
 	const { left, top, width, height } = canvas.getBoundingClientRect();
+	const aspectRatio = width / height;
 	const clickX = e.clientX - left;
 	const clickY = e.clientY - top;
-	const normalizedX = (clickX / width) * 2 - 1;
-	const normalizedY = -((clickY / height) * 2 - 1); // Flip y to match WebGL orientation.
+	let normalizedX = (clickX / width) * 2 - 1;
+	let normalizedY = -((clickY / height) * 2 - 1); // Flip y to match WebGL orientation.
+	if (aspectRatio > 1.0) {
+		// Landscape.
+		normalizedX *= aspectRatio;
+	} else {
+		// Portrait.
+		normalizedY /= aspectRatio;
+	}
 	const xPosition = smoothedPosition[0] + normalizedX / Math.pow(2, smoothedZoom[0]);
 	const yPosition = smoothedPosition[1] + normalizedY / Math.pow(2, smoothedZoom[0]);
 	positionTween.stop();
