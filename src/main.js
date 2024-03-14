@@ -289,7 +289,8 @@ let colors = new Float32Array(N_COLORS * 3);
 let nextPaletteIdx = 0;
 function updateColors(direction = 1) {
 	nextPaletteIdx = (palettes.length + nextPaletteIdx + direction) % palettes.length;
-	const normalizedPalette = palettes[nextPaletteIdx].map(hexToNormalizedRGB);
+	const nextPalette = palettes[nextPaletteIdx];
+	const normalizedPalette = nextPalette.map(hexToNormalizedRGB);
 	for (let i = 0; i < N_COLORS; ++i) {
 		const rgbComponents = [...normalizedPalette[i % normalizedPalette.length]];
 		if (i >= normalizedPalette.length) {
@@ -303,6 +304,7 @@ function updateColors(direction = 1) {
 		colors[rIdx + 1] = rgbComponents[1];
 		colors[rIdx + 2] = rgbComponents[2];
 	}
+	document.documentElement.style.backgroundColor = nextPalette[0];
 }
 updateColors(0);
 
