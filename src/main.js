@@ -195,6 +195,8 @@ function updateStateFromHash() {
 	try {
 		hash.split('_')
 			.map(str => {
+				if (!str) return null;
+
 				const [shortKey, encodedValue] = str.split('=');
 				const key = Object.keys(shortKeys).find(k => shortKeys[k] === shortKey);
 				if (!key) {
@@ -420,5 +422,3 @@ canvas.addEventListener('touchend', e => {
 // Start it up.
 updateStateFromHash();
 requestAnimationFrame(render);
-
-console.log(state, smoothedPosition, smoothedZoom);
