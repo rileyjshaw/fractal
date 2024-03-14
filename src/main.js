@@ -407,45 +407,6 @@ canvas.addEventListener('wheel', e => {
 	// HACK(riley): Tween.js has a bug where stop() doesn’t work completely until the end is reached.
 	zoomTween.to([state.zoom], 0).end();
 });
-// Add pinch to zoom on mobile.
-let initialDistance = null;
-function getDistance(touches) {
-	const dx = touches[0].pageX - touches[1].pageX;
-	const dy = touches[0].pageY - touches[1].pageY;
-	return Math.sqrt(dx * dx + dy * dy);
-}
-canvas.addEventListener(
-	'touchstart',
-	e => {
-		if (e.touches.length === 2) {
-			e.preventDefault();
-			initialDistance = getDistance(e.touches);
-		}
-	},
-	{ passive: false },
-);
-canvas.addEventListener(
-	'touchmove',
-	e => {
-		if (e.touches.length === 2) {
-			e.preventDefault();
-			const distance = getDistance(e.touches);
-			const delta = distance / initialDistance;
-			zoomTween.stop();
-			setState({ zoom: Math.max(MIN_ZOOM_EXPONENT, Math.min(MAX_ZOOM_EXPONENT, smoothedZoom[0] + delta)) });
-			smoothedZoom[0] = state.zoom;
-			// HACK(riley): Tween.js has a bug where stop() doesn’t work completely until the end is reached.
-			zoomTween.to([state.zoom], 0).end();
-			initialDistance = distance;
-		} else if (e.scale !== 1) {
-			e.preventDefault();
-		}
-	},
-	{ passive: false },
-);
-canvas.addEventListener('touchend', e => {
-	initialDistance = null;
-});
 
 // Start it up.
 updateStateFromHash();

@@ -1,3 +1,9 @@
+html {
+	overflow: hidden;
+	overscroll-behavior: none;
+	zoom: unset;
+}
+
 body {
 	margin: 0;
 }
