@@ -23,6 +23,11 @@ import './style.css';
 const N_COLORS = 32;
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 98304;
+const MIN_EXPONENT = 2;
+const MAX_EXPONENT = 16;
+const MAX_CONSTANT_COMPONENT = 2.5; // The maximum absolute value of the constant C’s real or imaginary component.
+const MIN_RESOLUTION_MULTIPLIER = 0.0625; // 6.25%.
+const MAX_RESOLUTION_MULTIPLIER = 2; // 200%.
 
 // Derived.
 const MIN_ZOOM_EXPONENT = Math.log(MIN_ZOOM) / Math.log(2);
@@ -34,29 +39,29 @@ tinykeys(window, {
 	'Shift+KeyC': () => updateColors(-1),
 	// Increase / decrease resolution density.
 	KeyD: () => {
-		resolutionMultiplier = Math.min(2, resolutionMultiplier * 2);
+		resolutionMultiplier = Math.min(MAX_RESOLUTION_MULTIPLIER, resolutionMultiplier * 2);
 		showInfo(`Density: ${resolutionMultiplier * 100}%`);
 	},
 	'Shift+KeyD': () => {
-		resolutionMultiplier = Math.max(6.25, resolutionMultiplier / 2);
+		resolutionMultiplier = Math.max(MIN_RESOLUTION_MULTIPLIER, resolutionMultiplier / 2);
 		showInfo(`Density: ${resolutionMultiplier * 100}%`);
 	},
 	// Increase / decrease set exponent.
 	KeyE: () => {
-		setState({ exponent: Math.min(16, state.exponent + 1) });
+		setState({ exponent: Math.min(MAX_EXPONENT, state.exponent + 1) });
 		showInfo(`Exponent: ${state.exponent}`);
 	},
 	'Shift+KeyE': () => {
-		setState({ exponent: Math.max(2, state.exponent - 1) });
+		setState({ exponent: Math.max(MIN_EXPONENT, state.exponent - 1) });
 		showInfo(`Exponent: ${state.exponent}`);
 	},
 	// Increase / decrease imaginary component.
 	KeyI: () => {
-		setState({ cImaginary: Math.min(3, state.cImaginary + 0.01) });
+		setState({ cImaginary: Math.min(MAX_CONSTANT_COMPONENT, state.cImaginary + 0.01) });
 		showInfo(`C (imaginary): ${state.cImaginary.toFixed(2)}`);
 	},
 	'Shift+KeyI': () => {
-		setState({ cImaginary: Math.max(-3, state.cImaginary - 0.01) });
+		setState({ cImaginary: Math.max(-MAX_CONSTANT_COMPONENT, state.cImaginary - 0.01) });
 		showInfo(`C (imaginary): ${state.cImaginary.toFixed(2)}`);
 	},
 	// Show / hide labels.
@@ -76,11 +81,11 @@ tinykeys(window, {
 	},
 	// Increase / decrease real component.
 	KeyR: () => {
-		setState({ cReal: Math.min(3, state.cReal + 0.01) });
+		setState({ cReal: Math.min(MAX_CONSTANT_COMPONENT, state.cReal + 0.01) });
 		showInfo(`C (real): ${state.cReal.toFixed(2)}`);
 	},
 	'Shift+KeyR': () => {
-		setState({ cReal: Math.max(-3, state.cReal - 0.01) });
+		setState({ cReal: Math.max(-MAX_CONSTANT_COMPONENT, state.cReal - 0.01) });
 		showInfo(`C (real): ${state.cReal.toFixed(2)}`);
 	},
 	// Maximum zoom in / out.
@@ -427,17 +432,24 @@ handleTouch(canvas, (direction, delta, additionalFingers) => {
 		}
 	} else if (additionalFingers === 1) {
 		// Do nothing. People tend to accidentally trigger this when they try
-		// to pinch zoom, so better to ignore it.
+		// to pinch zoom, so it’s best to ignore two-fingered gestures.
 	} else if (additionalFingers === 2) {
 		if (direction === 'x') {
-			setState({ cReal: state.cReal + delta * 0.01 });
+			setState({
+				cReal: Math.max(-MAX_CONSTANT_COMPONENT, Math.min(MAX_CONSTANT_COMPONENT, state.cReal + delta * 0.01)),
+			});
 		} else {
-			setState({ cImaginary: state.cImaginary + delta * 0.01 });
+			setState({
+				cImaginary: Math.max(
+					-MAX_CONSTANT_COMPONENT,
+					Math.min(MAX_CONSTANT_COMPONENT, state.cImaginary + delta * 0.01),
+				),
+			});
 		}
 	} else if (additionalFingers === 3) {
 		if (direction === 'x') {
 			if (Math.abs(delta) < 32) return { skip: true };
-			setState({ exponent: Math.max(2, Math.min(16, state.exponent + Math.sign(delta))) });
+			setState({ exponent: Math.max(MIN_EXPONENT, Math.min(MAX_EXPONENT, state.exponent + Math.sign(delta))) });
 		} else {
 			if (Math.abs(delta) < 64) return { skip: true };
 			setState({ animationDirection: Math.sign(delta) });
