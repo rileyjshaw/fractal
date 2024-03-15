@@ -52,6 +52,7 @@ canvas {
 		system-ui,
 		sans-serif;
 	inset: 12px;
+	overflow: auto;
 	padding: 24px;
 	position: fixed;
 }
@@ -60,7 +61,6 @@ canvas {
 	height: 100%;
 	margin: auto;
 	max-width: 60em;
-	overflow: scroll;
 }
 
 h1,
@@ -113,6 +113,10 @@ kbd {
 	font: inherit;
 	margin: 36px auto;
 	padding: 12px 24px;
+}
+
+.spacer {
+	height: 1em;
 }
 
 #error,
