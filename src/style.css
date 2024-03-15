@@ -1,3 +1,10 @@
+* {
+	touch-callout: none;
+	user-select: none;
+	user-drag: none;
+	touch-action: none;
+}
+
 html {
 	overflow: hidden;
 	overscroll-behavior: none;
