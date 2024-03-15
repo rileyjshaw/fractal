@@ -26,6 +26,22 @@ canvas {
 	width: 100%;
 }
 
+#show-instructions {
+	align-items: center;
+	background: rgba(0, 0, 0, 0.94);
+	border-radius: 99px;
+	border: 2px solid #fff;
+	color: #fff;
+	display: none;
+	font-size: 24px;
+	height: 36px;
+	justify-content: center;
+	position: fixed;
+	right: 12px;
+	top: 12px;
+	width: 36px;
+}
+
 #instructions {
 	background: rgba(0, 0, 0, 0.94);
 	border-radius: 8px;
@@ -122,6 +138,10 @@ kbd {
 
 .show {
 	display: block !important;
+}
+
+#show-instructions.show {
+	display: flex !important;
 }
 
 a {

@@ -215,7 +215,8 @@ const persistStateToHash = throttle(function persistStateToHash() {
 function updateStateFromHash() {
 	const hash = location.hash.substring(1); // Remove the "#".
 	try {
-		hash.split('_')
+		const entries = hash
+			.split('_')
 			.map(str => {
 				if (!str) return null;
 
@@ -229,21 +230,23 @@ function updateStateFromHash() {
 				const value = parser(decodeURIComponent(encodedValue));
 				return [key, value];
 			})
-			.filter(Boolean)
-			.forEach(([key, value]) => {
-				state[key] = value;
-				switch (key) {
-					case 'xPosition':
-						smoothedPosition[0] = value;
-						break;
-					case 'yPosition':
-						smoothedPosition[1] = value;
-						break;
-					case 'zoom':
-						smoothedZoom[0] = value;
-						break;
-				}
-			});
+			.filter(Boolean);
+		entries.forEach(([key, value]) => {
+			state[key] = value;
+			switch (key) {
+				case 'xPosition':
+					smoothedPosition[0] = value;
+					break;
+				case 'yPosition':
+					smoothedPosition[1] = value;
+					break;
+				case 'zoom':
+					smoothedZoom[0] = value;
+					break;
+			}
+		});
+
+		return entries.length;
 	} catch (e) {
 		// Handle parsing error.
 		console.error('Error parsing the hash', e);
@@ -385,6 +388,12 @@ instructionsContainer.querySelector('.start-button').addEventListener('click', (
 	instructionsContainer.classList.remove('show');
 });
 
+const showInstructionsButton = document.getElementById('show-instructions');
+showInstructionsButton.addEventListener('click', () => {
+	showInstructionsButton.classList.remove('show');
+	instructionsContainer.classList.add('show');
+});
+
 const desktopControlsContainer = document.getElementById('desktop-controls');
 const mobileControlsContainer = document.getElementById('mobile-controls');
 document.getElementById('show-mobile-controls').addEventListener('click', () => {
@@ -473,5 +482,12 @@ handleTouch(canvas, (direction, delta, additionalFingers) => {
 });
 
 // Start it up.
-updateStateFromHash();
+const nStateUpdates = updateStateFromHash();
 requestAnimationFrame(render);
+
+const shouldShowInstructions = nStateUpdates < 3;
+if (shouldShowInstructions) {
+	instructionsContainer.classList.add('show');
+} else {
+	document.getElementById('show-instructions').classList.add('show');
+}
