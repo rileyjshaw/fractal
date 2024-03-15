@@ -3,11 +3,12 @@ export default function handleTouch(element, handler, { threshold = 12 } = {}) {
 	const prevTouchCoordinates = {};
 
 	function handleTouchStart(e) {
-		latestTouchId = Array.from(e.changedTouches)[0]?.identifier;
-		if (latestTouchId == null) return;
+		const latestTouch = e.changedTouches[0];
+		latestTouchId = latestTouch?.identifier;
+		if (!latestTouch) return;
 		prevTouchCoordinates[latestTouchId] = {
-			x: e.touches[0].clientX,
-			y: e.touches[0].clientY,
+			x: latestTouch.clientX,
+			y: latestTouch.clientY,
 		};
 	}
 

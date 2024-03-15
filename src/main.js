@@ -426,12 +426,15 @@ handleTouch(canvas, (direction, delta, additionalFingers) => {
 			zoomTween.to([state.zoom], 0).end();
 		}
 	} else if (additionalFingers === 1) {
+		// Do nothing. People tend to accidentally trigger this when they try
+		// to pinch zoom, so better to ignore it.
+	} else if (additionalFingers === 2) {
 		if (direction === 'x') {
 			setState({ cReal: state.cReal + delta * 0.01 });
 		} else {
 			setState({ cImaginary: state.cImaginary + delta * 0.01 });
 		}
-	} else if (additionalFingers === 2) {
+	} else if (additionalFingers === 3) {
 		if (direction === 'x') {
 			if (Math.abs(delta) < 32) return { skip: true };
 			setState({ exponent: Math.max(2, Math.min(16, state.exponent + Math.sign(delta))) });
