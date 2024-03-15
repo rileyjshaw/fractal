@@ -202,6 +202,8 @@ function resetState() {
 	smoothedPosition[0] = state.xPosition;
 	smoothedPosition[1] = state.yPosition;
 	smoothedZoom[0] = state.zoom;
+	paletteIdx = 0;
+	updateColors(0);
 	updateHash('');
 }
 
@@ -308,12 +310,12 @@ const fragmentShaderInfo = createProgramInfo(gl, [vertexSource, fragmentSource])
 
 let colors = new Float32Array(N_COLORS * 3);
 function updateColors(direction = 1) {
-	nextPaletteIdx = (paletteIds.length + nextPaletteIdx + direction) % paletteIds.length;
-	const nextPaletteId = paletteIds[nextPaletteIdx];
-	const nextPalette = palettes[nextPaletteId];
-	if (direction) setState({ paletteId: nextPaletteId });
+	paletteIdx = (paletteIds.length + paletteIdx + direction) % paletteIds.length;
+	const paletteId = paletteIds[paletteIdx];
+	const palette = palettes[paletteId];
+	if (direction) setState({ paletteId: paletteId });
 
-	const normalizedPalette = nextPalette.map(hexToNormalizedRGB);
+	const normalizedPalette = palette.map(hexToNormalizedRGB);
 	for (let i = 0; i < N_COLORS; ++i) {
 		const rgbComponents = [...normalizedPalette[i % normalizedPalette.length]];
 		if (i >= normalizedPalette.length) {
@@ -327,7 +329,7 @@ function updateColors(direction = 1) {
 		colors[rIdx + 1] = rgbComponents[1];
 		colors[rIdx + 2] = rgbComponents[2];
 	}
-	document.documentElement.style.backgroundColor = nextPalette[0];
+	document.documentElement.style.backgroundColor = palette[0];
 }
 
 const arrays = {
@@ -499,7 +501,7 @@ handleTouch(canvas, (direction, delta, additionalFingers) => {
 
 // Start it up.
 const nStateUpdates = updateStateFromHash();
-let nextPaletteIdx = paletteIds.indexOf(state.paletteId);
+let paletteIdx = paletteIds.indexOf(state.paletteId);
 updateColors(0);
 requestAnimationFrame(render);
 
