@@ -257,6 +257,10 @@ function updateStateFromHash() {
 				case 'zoom':
 					smoothedZoom[0] = value;
 					break;
+				case 'paletteId':
+					paletteIdx = paletteIds.indexOf(value);
+					updateColors(0);
+					break;
 			}
 		});
 
