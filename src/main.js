@@ -419,7 +419,7 @@ handleTouch(canvas, (direction, delta, additionalFingers) => {
 		} else {
 			zoomTween.stop();
 			setState({
-				zoom: Math.max(MIN_ZOOM_EXPONENT, Math.min(MAX_ZOOM_EXPONENT, smoothedZoom[0] + delta * 0.05)),
+				zoom: Math.max(MIN_ZOOM_EXPONENT, Math.min(MAX_ZOOM_EXPONENT, smoothedZoom[0] - delta * 0.05)),
 			});
 			smoothedZoom[0] = state.zoom;
 			// HACK(riley): Tween.js has a bug where stop() doesn’t work completely until the end is reached.
@@ -434,7 +434,7 @@ handleTouch(canvas, (direction, delta, additionalFingers) => {
 	} else if (additionalFingers === 2) {
 		if (direction === 'x') {
 			if (Math.abs(delta) < 32) return { skip: true };
-			setState({ exponent: Math.max(2, Math.min(16, state.exponent + delta)) });
+			setState({ exponent: Math.max(2, Math.min(16, state.exponent + Math.sign(delta))) });
 		} else {
 			if (Math.abs(delta) < 64) return { skip: true };
 			setState({ animationDirection: Math.sign(delta) });
