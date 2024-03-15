@@ -99,6 +99,8 @@ tinykeys(window, {
 		setState({ zoom: MIN_ZOOM_EXPONENT });
 		zoomTween.to([MIN_ZOOM_EXPONENT], 20000).startFromCurrentValues();
 	},
+	// Reset state.
+	KeyX: resetState,
 	// Pan position.
 	ArrowUp: () => {
 		positionTween.stop();
@@ -192,6 +194,15 @@ const [state, shortKeys, stateParsers] = Object.entries({
 	},
 	[{}, {}, {}],
 );
+const defaultState = { ...state };
+
+function resetState() {
+	Object.assign(state, defaultState);
+	smoothedPosition[0] = state.xPosition;
+	smoothedPosition[1] = state.yPosition;
+	smoothedZoom[0] = state.zoom;
+	updateHash('');
+}
 
 function setState(diff) {
 	Object.entries(diff).forEach(([key, value]) => {
@@ -478,6 +489,9 @@ handleTouch(canvas, (direction, delta, additionalFingers) => {
 			if (Math.abs(delta) < 64) return { skip: true };
 			setState({ animationDirection: Math.sign(delta) });
 		}
+	} else if (additionalFingers === 4) {
+		if (Math.abs(delta) < 64) return { skip: true };
+		resetState();
 	}
 });
 
