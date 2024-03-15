@@ -7,6 +7,7 @@ uniform vec2 u_resolution;
 uniform int u_frame;
 uniform vec2 u_center;
 uniform float u_zoom;
+uniform uint u_fractalType;
 uniform int u_exponent;
 uniform float u_cReal;
 uniform float u_cImaginary;
@@ -47,6 +48,34 @@ int iterateJulia(vec2 coord, vec2 c) {
 	return maxIterations;
 }
 
+int iterateMandelbrot(vec2 coord) {
+	vec2 z = vec2(0.0);
+	for(int i = 0; i < maxIterations; i++) {
+		z = cpow(z, u_exponent) + coord;
+		if (length(z) > 2.0) return i;
+	}
+	return maxIterations;
+}
+
+int iterateBurningShip(vec2 coord) {
+	coord = vec2(1.0, -1.0) * coord;
+	vec2 z = vec2(0.0);
+	for(int i = 0; i < maxIterations; i++) {
+		z = cpow(abs(z), u_exponent) + coord;
+		if (length(z) > 2.0) return i;
+	}
+	return maxIterations;
+}
+
+int iterateMandala(vec2 coord, vec2 c) {
+	vec2 z = coord;
+	for(int i = 0; i < maxIterations; i++) {
+		z = cpow(abs(z), u_exponent) + c;
+		if (length(z) > 2.0) return i;
+	}
+	return maxIterations;
+}
+
 void main() {
 	float aspectRatio = u_resolution.x / u_resolution.y;
 
@@ -63,7 +92,22 @@ void main() {
 	// Center and zoom.
 	vec2 centeredCoords = (normalizedCoords / u_zoom + u_center) * 2.0;
 
-	int nIterations = iterateJulia(centeredCoords, vec2(u_cReal, u_cImaginary));
+	int nIterations;
+	switch (u_fractalType) {
+		case 0u:
+			nIterations = iterateJulia(centeredCoords, vec2(u_cReal, u_cImaginary));
+			break;
+		case 1u:
+			nIterations = iterateMandelbrot(centeredCoords);
+			break;
+		case 2u:
+			nIterations = iterateBurningShip(centeredCoords);
+			break;
+		case 3u:
+			nIterations = iterateMandala(centeredCoords, vec2(u_cReal, u_cImaginary));
+			break;
+	}
+
 	int colorIdx = (nIterations == 0 || nIterations == maxIterations) ? 0 : (nIterations + u_frame) % N_COLORS;
 	vec3 color = u_colors[colorIdx];
 	FragColor = vec4(color.rgb, 1.0);

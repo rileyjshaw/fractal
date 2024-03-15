@@ -3,7 +3,7 @@
 	<head>
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-		<title>Julia Set Explorer</title>
+		<title>Fractal Explorer</title>
 		<link as="font" href="/fonts/MintGrotesk-Regular-Subset.woff2" rel="preload" crossorigin="anonymous" />
 		<link rel="icon" href="/favicon-32x32.png" type="image/png" />
 		<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
@@ -22,9 +22,9 @@
 		<button id="show-instructions">?</button>
 		<div id="instructions">
 			<div>
-				<h1>Julia Set Explorer (GPU Edition)</h1>
+				<h1>Fractal Explorer</h1>
 				<p>
-					This is a Julia set explorer running as a shader on your GPU. The URL updates as you explore, so you
+					This is a fractal explorer running as a shader on your GPU. The URL updates as you explore, so you
 					can share discoveries just by copying the page address.
 				</p>
 				<p>
@@ -42,15 +42,16 @@
 						<li><kbd>C</kbd>: Increment color palette (decrement with <kbd>Shift</kbd> + <kbd>C</kbd>)</li>
 						<li><kbd>D</kbd>: Increase pixel density (decrease with <kbd>Shift</kbd> + <kbd>D</kbd>)</li>
 						<li><kbd>E</kbd>: Increase exponent (decrease with <kbd>Shift</kbd> + <kbd>E</kbd>)</li>
+						<li><kbd>F</kbd>: Change fractal type</li>
 						<li>
 							<kbd>I</kbd>: Increase constant imaginary component (decrease with <kbd>Shift</kbd> +
-							<kbd>I</kbd>)
+							<kbd>I</kbd>) (does not affect Mandelbrot or Burning Ship sets)
 						</li>
 						<li><kbd>L</kbd>: Show / hide command labels</li>
 						<li><kbd>O</kbd>: Reset center to origin</li>
 						<li>
 							<kbd>R</kbd>: Increase constant real component (decrease with <kbd>Shift</kbd> +
-							<kbd>R</kbd>)
+							<kbd>R</kbd>) (does not affect Mandelbrot or Burning Ship sets)
 						</li>
 						<li><kbd>X</kbd>: Clear state</li>
 						<li><kbd>Z</kbd>: Zoom in slowly (zoom out with <kbd>Shift</kbd> + <kbd>Z</kbd>)</li>
@@ -85,7 +86,8 @@
 					</ul>
 					<h3>With four extra fingers held down</h3>
 					<ul>
-						<li>Swipe <kbd>↔</kbd> or <kbd>↕</kbd>: Clear state</li>
+						<li>Swipe <kbd>↔</kbd>: Clear state</li>
+						<li>Swipe <kbd>↕</kbd>: Change fractal type</li>
 					</ul>
 				</div>
 				<p>

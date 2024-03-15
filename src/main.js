@@ -16,7 +16,7 @@ import handleTouch from './touch';
 
 // Shaders.
 import vertexSource from './vertex.vert';
-import fragmentSource from './julia.frag';
+import fragmentSource from './fractal.frag';
 
 import './style.css';
 
@@ -32,6 +32,8 @@ const MAX_RESOLUTION_MULTIPLIER = 2; // 200%.
 // Derived.
 const MIN_ZOOM_EXPONENT = Math.log(MIN_ZOOM) / Math.log(2);
 const MAX_ZOOM_EXPONENT = Math.log(MAX_ZOOM) / Math.log(2);
+
+const FRACTAL_TYPES = ['Julia', 'Mandelbrot', 'Burning Ship', 'Mandala'];
 
 tinykeys(window, {
 	// Change colors.
@@ -54,6 +56,15 @@ tinykeys(window, {
 	'Shift+KeyE': () => {
 		setState({ exponent: Math.max(MIN_EXPONENT, state.exponent - 1) });
 		showInfo(`Exponent: ${state.exponent}`);
+	},
+	// Change fractal type.
+	KeyF: () => {
+		setState({ fractalType: (state.fractalType + 1) % FRACTAL_TYPES.length });
+		showInfo(`Fractal type: ${FRACTAL_TYPES[state.fractalType]}`);
+	},
+	'Shift+KeyF': () => {
+		setState({ fractalType: (FRACTAL_TYPES.length + (state.fractalType - 1)) % FRACTAL_TYPES.length });
+		showInfo(`Fractal type: ${FRACTAL_TYPES[state.fractalType]}`);
 	},
 	// Increase / decrease imaginary component.
 	KeyI: () => {
@@ -184,6 +195,7 @@ const [state, shortKeys, stateParsers] = Object.entries({
 	xPosition: [0, 'X', parseNumber],
 	yPosition: [0, 'Y', parseNumber],
 	zoom: [MIN_ZOOM_EXPONENT, 'Z', parseNumber],
+	fractalType: [0, 'F', parseNumber],
 	isPlaying: [1, 'P', parseNumber],
 	animationDirection: [1, 'D', parseNumber],
 }).reduce(
@@ -392,6 +404,7 @@ function render(time) {
 		u_frame: state.isPlaying ? colors.length + (((time * state.animationDirection) / 62.5) % colors.length) : 0, // 16 fps.
 		u_center: smoothedPosition,
 		u_zoom: Math.pow(2, smoothedZoom[0]),
+		u_fractalType: state.fractalType,
 		u_exponent: state.exponent,
 		u_cReal: state.cReal,
 		u_cImaginary: state.cImaginary,
@@ -498,8 +511,15 @@ handleTouch(canvas, (direction, delta, additionalFingers) => {
 			setState({ animationDirection: Math.sign(delta) });
 		}
 	} else if (additionalFingers === 4) {
-		if (Math.abs(delta) < 64) return { skip: true };
-		resetState();
+		if (direction === 'x') {
+			if (Math.abs(delta) < 64) return { skip: true };
+			resetState();
+		} else {
+			if (Math.abs(delta) < 64) return { skip: true };
+			setState({
+				fractalType: (FRACTAL_TYPES.length + state.fractalType + Math.sign(delta)) % FRACTAL_TYPES.length,
+			});
+		}
 	}
 });
 

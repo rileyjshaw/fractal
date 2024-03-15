@@ -1,8 +1,8 @@
-# Julia Set Explorer: GPU Edition
+# Fractal Explorer: GPU Edition
 
-This is a Julia set explorer running as a shader on your GPU. The full controls require a keyboard and mouse. You can read more about the project and [try it out online](https://rileyjshaw.com/julia).
+This is a fractal explorer running as a shader on your GPU. You can read more about the project and [try it out online](https://rileyjshaw.com/julia).
 
-This is a quick project I threw together to generate shallow Julia zooms. It's not precious, so please [add pull requests](https://github.com/rileyjshaw/julia/pulls) if you have ideas! I’ll merge changes quickly as long as the app remains reasonably performant.
+This is a quick project I threw together to generate shallow Julia set zooms. It's not precious, so please [add pull requests](https://github.com/rileyjshaw/julia/pulls) if you have ideas! I’ll merge changes quickly as long as the app remains reasonably performant.
 
 ![Example program output](/screenshots/julia.png)
 
