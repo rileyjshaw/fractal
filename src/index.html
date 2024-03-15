@@ -4,6 +4,7 @@
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
 		<title>Julia Set Explorer</title>
+		<link as="font" href="/fonts/MintGrotesk-Regular-Subset.woff2" rel="preload" crossorigin="anonymous" />
 		<link rel="icon" href="/favicon-32x32.png" type="image/png" />
 		<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
 		<link rel="manifest" href="/manifest.webmanifest" crossorigin="anonymous" />
@@ -22,48 +23,84 @@
 			<div>
 				<h1>Julia Set Explorer (GPU Edition)</h1>
 				<p>
-					This is a Julia set explorer running as a shader on your GPU. The full controls require a keyboard
-					and mouse.
-				</p>
-				<p>
-					It’s a naive implementation that doesn’t allow for arbitrary precision. This means that it loses
-					resolution at a relatively shallow zoom depth of ~100000x.
+					This is a Julia set explorer running as a shader on your GPU. It’s a naive implementation that
+					doesn’t allow for arbitrary precision. This means that it loses resolution at a relatively shallow
+					zoom depth of ~100000x.
 				</p>
 				<p>
 					If you take any cool screenshots, feel free to share them with me. I love seeing how people use
 					tools like this.
 				</p>
-				<h2>Controls</h2>
-				<ul>
-					<li>Click: set the image center</li>
-					<li>Scroll: zoom in / out</li>
-					<li><kbd>C</kbd>: Increment color palette (decrement with <kbd>Shift</kbd> + <kbd>C</kbd>)</li>
-					<li><kbd>D</kbd>: Increase pixel density (decrease with <kbd>Shift</kbd> + <kbd>D</kbd>)</li>
-					<li><kbd>E</kbd>: Increase set exponent (decrease with <kbd>Shift</kbd> + <kbd>E</kbd>)</li>
-					<li>
-						<kbd>I</kbd>: Increase constant imaginary component (decrease with <kbd>Shift</kbd> +
-						<kbd>I</kbd>)
-					</li>
-					<li><kbd>L</kbd>: Show / hide command labels</li>
-					<li><kbd>O</kbd>: Reset center to origin</li>
-					<li>
-						<kbd>R</kbd>: Increase constant real component (decrease with <kbd>Shift</kbd> + <kbd>R</kbd>)
-					</li>
-					<li><kbd>Z</kbd>: Zoom in slowly (zoom out with <kbd>Shift</kbd> + <kbd>Z</kbd>)</li>
-					<li><kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd>: Fine-adjust image center</li>
-					<li>
-						<kbd>Space</kbd>: Play / pause animation (change direction with <kbd>Shift</kbd> +
-						<kbd>Space</kbd>)
-					</li>
-					<li><kbd>?</kbd>: Show this info pane</li>
-					<li><kbd>Esc</kbd>: Hide this info pane</li>
-				</ul>
+				<div id="desktop-controls" class="show">
+					<div class="controls-heading">
+						<h2>Desktop controls</h2>
+						<button id="show-mobile-controls">Show mobile controls</button>
+					</div>
+					<ul>
+						<li>Click: set the image center</li>
+						<li>Scroll <kbd>↕</kbd>: zoom in / out</li>
+						<li><kbd>C</kbd>: Increment color palette (decrement with <kbd>Shift</kbd> + <kbd>C</kbd>)</li>
+						<li><kbd>D</kbd>: Increase pixel density (decrease with <kbd>Shift</kbd> + <kbd>D</kbd>)</li>
+						<li><kbd>E</kbd>: Increase exponent (decrease with <kbd>Shift</kbd> + <kbd>E</kbd>)</li>
+						<li>
+							<kbd>I</kbd>: Increase constant imaginary component (decrease with <kbd>Shift</kbd> +
+							<kbd>I</kbd>)
+						</li>
+						<li><kbd>L</kbd>: Show / hide command labels</li>
+						<li><kbd>O</kbd>: Reset center to origin</li>
+						<li>
+							<kbd>R</kbd>: Increase constant real component (decrease with <kbd>Shift</kbd> +
+							<kbd>R</kbd>)
+						</li>
+						<li><kbd>Z</kbd>: Zoom in slowly (zoom out with <kbd>Shift</kbd> + <kbd>Z</kbd>)</li>
+						<li><kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd>: Fine-adjust image center</li>
+						<li>
+							<kbd>Space</kbd>: Play / pause animation (change direction with <kbd>Shift</kbd> +
+							<kbd>Space</kbd>)
+						</li>
+						<li><kbd>?</kbd>: Show this info pane</li>
+						<li><kbd>Esc</kbd>: Hide this info pane</li>
+					</ul>
+				</div>
+				<div id="mobile-controls">
+					<div class="controls-heading">
+						<h2>Mobile controls</h2>
+						<button id="show-desktop-controls">Show desktop controls</button>
+					</div>
+					<ul>
+						<li>Tap: set the image center</li>
+						<li>Swipe <kbd>↔</kbd>: Change color palette</li>
+						<li>Swipe <kbd>↕</kbd>: Zoom in / out</li>
+					</ul>
+					<h3>With two extra fingers held down</h3>
+					<ul>
+						<li>Swipe <kbd>↔</kbd>: Change constant real component</li>
+						<li>Swipe <kbd>↕</kbd>: Change constant imaginary component</li>
+					</ul>
+					<h3>With three extra fingers held down</h3>
+					<ul>
+						<li>Swipe <kbd>↔</kbd>: Change exponent</li>
+						<li>Swipe <kbd>↕</kbd>: Change animation direction</li>
+					</ul>
+					<h3>With four extra fingers held down</h3>
+					<ul>
+						<li>Swipe <kbd>↔</kbd> or <kbd>↕</kbd>: Clear state</li>
+					</ul>
+				</div>
 				<p>
-					Note: not everything is configurable from this interface. To make deeper tweaks, follow
-					<a href="https://github.com/rileyjshaw/julia">the README</a>
-					and start running the code locally.
+					This code is
+					<a href="https://github.com/rileyjshaw/julia" target="_blank" rel="noopener noreferrer"
+						>open source</a
+					>
+					and licensed under the
+					<a
+						href="https://github.com/rileyjshaw/julia/blob/main/LICENSE"
+						target="_blank"
+						rel="noopener noreferrer"
+						>GNU General Public License v3.0</a
+					>.
 				</p>
-				<button autofocus>Get started</button>
+				<button class="start-button" autofocus>Get started</button>
 			</div>
 		</div>
 		<div id="error">!</div>

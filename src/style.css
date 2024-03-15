@@ -1,8 +1,9 @@
 * {
-	touch-callout: none;
-	user-select: none;
-	user-drag: none;
+	box-sizing: border-box;
+	min-width: 0;
 	touch-action: none;
+	touch-callout: none;
+	user-drag: none;
 }
 
 html {
@@ -16,42 +17,63 @@ body {
 }
 
 canvas {
-	position: fixed;
-	inset: 0;
-	width: 100%;
 	height: 100%;
-	image-rendering: pixelated;
 	image-rendering: crisp-edges;
+	image-rendering: pixelated;
+	inset: 0;
+	position: fixed;
+	user-select: none;
+	width: 100%;
 }
 
 #instructions {
+	background: rgba(0, 0, 0, 0.94);
+	border-radius: 8px;
+	color: #fff;
 	display: none;
-	position: fixed;
+	font:
+		16px 'Mint Grotesk',
+		system-ui,
+		sans-serif;
 	inset: 12px;
 	padding: 24px;
-	font: 16px monospace;
-	color: #fff;
-	background: rgba(0, 0, 0, 0.94);
-	border-radius: 4px;
+	position: fixed;
 }
 
 #instructions > div {
 	height: 100%;
-	max-width: 60em;
 	margin: auto;
+	max-width: 60em;
 	overflow: scroll;
 }
 
-#instructions button {
-	display: block;
-	padding: 12px 24px;
-	margin: 36px auto;
-	font: inherit;
-	cursor: pointer;
+h1,
+p {
+	text-wrap: pretty;
 }
 
-a {
-	color: inherit;
+#desktop-controls,
+#mobile-controls {
+	display: none;
+	margin-bottom: 3em;
+}
+
+.controls-heading {
+	align-items: baseline;
+	display: flex;
+	flex-wrap: wrap;
+	column-gap: 12px;
+}
+.controls-heading h2 {
+	margin-bottom: 0;
+}
+.controls-heading button {
+	all: unset;
+	text-decoration: underline;
+}
+
+ul {
+	padding-left: 1em;
 }
 
 kbd {
@@ -70,17 +92,24 @@ kbd {
 	white-space: nowrap;
 }
 
+.start-button {
+	display: block;
+	font: inherit;
+	margin: 36px auto;
+	padding: 12px 24px;
+}
+
 #error,
 #info {
-	position: fixed;
+	background: #000;
 	bottom: 24px;
-	padding: 6px 12px;
+	color: #fff;
+	display: none;
+	font-family: monospace;
 	font-size: 24px;
 	font-weight: bold;
-	color: #fff;
-	font-family: monospace;
-	background: #000;
-	display: none;
+	padding: 6px 12px;
+	position: fixed;
 }
 
 #error {
@@ -93,4 +122,21 @@ kbd {
 
 .show {
 	display: block !important;
+}
+
+a {
+	color: inherit;
+}
+
+a[target='_blank'] {
+	cursor: alias;
+}
+
+a[target='_blank']::after {
+	content: '\202F\2197';
+}
+
+button {
+	cursor: pointer !important;
+	user-select: none !important;
 }
