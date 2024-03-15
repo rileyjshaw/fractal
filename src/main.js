@@ -414,6 +414,7 @@ canvas.addEventListener('wheel', e => {
 handleTouch(canvas, (direction, delta, additionalFingers) => {
 	if (additionalFingers === 0) {
 		if (direction === 'x') {
+			if (Math.abs(delta) < 32) return { skip: true };
 			updateColors(Math.sign(delta));
 		} else {
 			zoomTween.stop();
@@ -432,8 +433,10 @@ handleTouch(canvas, (direction, delta, additionalFingers) => {
 		}
 	} else if (additionalFingers === 2) {
 		if (direction === 'x') {
+			if (Math.abs(delta) < 32) return { skip: true };
 			setState({ exponent: Math.max(2, Math.min(16, state.exponent + delta)) });
 		} else {
+			if (Math.abs(delta) < 64) return { skip: true };
 			setState({ animationDirection: Math.sign(delta) });
 		}
 	}

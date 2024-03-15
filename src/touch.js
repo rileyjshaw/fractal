@@ -28,7 +28,9 @@ export default function handleTouch(element, handler, { threshold = 12 } = {}) {
 		}
 		if (!direction) return;
 
-		handler(direction, direction === 'x' ? diffX : diffY, e.touches.length - 1, e);
+		const result = handler(direction, direction === 'x' ? diffX : diffY, e.touches.length - 1, e);
+		if (result?.skip) return;
+
 		Object.assign(prevTouchCoordinates[latestTouchId], { x: touch.clientX, y: touch.clientY });
 	}
 
