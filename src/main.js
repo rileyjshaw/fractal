@@ -410,18 +410,18 @@ showInstructionsButton.addEventListener('click', () => {
 });
 
 const desktopControlsContainer = document.getElementById('desktop-controls');
-const mobileControlsContainer = document.getElementById('mobile-controls');
-document.getElementById('show-mobile-controls').addEventListener('click', () => {
+const touchControlsContainer = document.getElementById('touch-controls');
+document.getElementById('show-touch-controls').addEventListener('click', () => {
 	desktopControlsContainer.classList.remove('show');
-	mobileControlsContainer.classList.add('show');
+	touchControlsContainer.classList.add('show');
 });
 document.getElementById('show-desktop-controls').addEventListener('click', () => {
-	mobileControlsContainer.classList.remove('show');
+	touchControlsContainer.classList.remove('show');
 	desktopControlsContainer.classList.add('show');
 });
 if (window.matchMedia('(pointer: coarse)').matches) {
 	desktopControlsContainer.classList.remove('show');
-	mobileControlsContainer.classList.add('show');
+	touchControlsContainer.classList.add('show');
 }
 
 window.addEventListener('hashchange', updateStateFromHash);
