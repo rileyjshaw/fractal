@@ -12,6 +12,7 @@ import { Tween, Easing } from '@tweenjs/tween.js';
 
 import palettes from './palettes';
 import { hexToNormalizedRGB, identity, parseNumber, throttle, updateHash } from './util';
+import handleTouch from './touch';
 
 // Shaders.
 import vertexSource from './vertex.vert';
@@ -408,6 +409,34 @@ canvas.addEventListener('wheel', e => {
 	smoothedZoom[0] = state.zoom;
 	// HACK(riley): Tween.js has a bug where stop() doesn’t work completely until the end is reached.
 	zoomTween.to([state.zoom], 0).end();
+});
+
+handleTouch(canvas, (direction, delta, additionalFingers) => {
+	if (additionalFingers === 0) {
+		if (direction === 'x') {
+			updateColors(Math.sign(delta));
+		} else {
+			zoomTween.stop();
+			setState({
+				zoom: Math.max(MIN_ZOOM_EXPONENT, Math.min(MAX_ZOOM_EXPONENT, smoothedZoom[0] + delta * 0.05)),
+			});
+			smoothedZoom[0] = state.zoom;
+			// HACK(riley): Tween.js has a bug where stop() doesn’t work completely until the end is reached.
+			zoomTween.to([state.zoom], 0).end();
+		}
+	} else if (additionalFingers === 1) {
+		if (direction === 'x') {
+			setState({ cReal: state.cReal + delta * 0.01 });
+		} else {
+			setState({ cImaginary: state.cImaginary + delta * 0.01 });
+		}
+	} else if (additionalFingers === 2) {
+		if (direction === 'x') {
+			setState({ exponent: Math.max(2, Math.min(16, state.exponent + delta)) });
+		} else {
+			setState({ animationDirection: Math.sign(delta) });
+		}
+	}
 });
 
 // Start it up.
