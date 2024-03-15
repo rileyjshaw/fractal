@@ -10,7 +10,7 @@ import {
 import { tinykeys } from 'tinykeys';
 import { Tween, Easing } from '@tweenjs/tween.js';
 
-import palettes from './palettes';
+import palettes, { paletteIds } from './palettes';
 import { hexToNormalizedRGB, identity, parseNumber, throttle, updateHash } from './util';
 import handleTouch from './touch';
 
@@ -179,6 +179,7 @@ const [state, shortKeys, stateParsers] = Object.entries({
 	// Format: [default value, short key, parser]
 	cReal: [-0.71, 'R', parseNumber],
 	cImaginary: [-0.43, 'I', parseNumber],
+	paletteId: [paletteIds[0], 'C'],
 	exponent: [2, 'E', parseNumber],
 	xPosition: [0, 'X', parseNumber],
 	yPosition: [0, 'Y', parseNumber],
@@ -306,10 +307,12 @@ gl.imageSmoothingEnabled = false;
 const fragmentShaderInfo = createProgramInfo(gl, [vertexSource, fragmentSource]);
 
 let colors = new Float32Array(N_COLORS * 3);
-let nextPaletteIdx = 0;
 function updateColors(direction = 1) {
-	nextPaletteIdx = (palettes.length + nextPaletteIdx + direction) % palettes.length;
-	const nextPalette = palettes[nextPaletteIdx];
+	nextPaletteIdx = (paletteIds.length + nextPaletteIdx + direction) % paletteIds.length;
+	const nextPaletteId = paletteIds[nextPaletteIdx];
+	const nextPalette = palettes[nextPaletteId];
+	if (direction) setState({ paletteId: nextPaletteId });
+
 	const normalizedPalette = nextPalette.map(hexToNormalizedRGB);
 	for (let i = 0; i < N_COLORS; ++i) {
 		const rgbComponents = [...normalizedPalette[i % normalizedPalette.length]];
@@ -326,7 +329,6 @@ function updateColors(direction = 1) {
 	}
 	document.documentElement.style.backgroundColor = nextPalette[0];
 }
-updateColors(0);
 
 const arrays = {
 	position: {
@@ -497,6 +499,8 @@ handleTouch(canvas, (direction, delta, additionalFingers) => {
 
 // Start it up.
 const nStateUpdates = updateStateFromHash();
+let nextPaletteIdx = paletteIds.indexOf(state.paletteId);
+updateColors(0);
 requestAnimationFrame(render);
 
 const shouldShowInstructions = nStateUpdates < 3;
