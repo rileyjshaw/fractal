@@ -203,6 +203,7 @@ const [state, shortKeys, stateParsers] = Object.entries({
 	fractalType: [0, 'F', parseNumber],
 	isPlaying: [1, 'P', parseNumber],
 	animationDirection: [1, 'D', parseNumber],
+	forceHelp: [0, 'H', parseNumber],
 }).reduce(
 	([state, shortKeys, stateParsers], [key, [value, shortKey, parser]]) => {
 		state[key] = value;
@@ -551,7 +552,7 @@ const nStateUpdates = updateStateFromHash();
 updateColors(0);
 requestAnimationFrame(render);
 
-const shouldShowInstructions = nStateUpdates < 3;
+const shouldShowInstructions = nStateUpdates < 3 || state.forceHelp;
 if (shouldShowInstructions) {
 	instructionsContainer.classList.add('show');
 } else {
