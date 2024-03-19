@@ -37,7 +37,7 @@ const FRACTAL_TYPES = ['Julia', 'Mandelbrot', 'Burning Ship', 'Mandala'];
 
 tinykeys(window, {
 	// Change colors.
-	KeyC: () => updateColors(),
+	KeyC: () => updateColors(1),
 	'Shift+KeyC': () => updateColors(-1),
 	// Increase / decrease resolution density.
 	KeyD: () => {
@@ -98,6 +98,11 @@ tinykeys(window, {
 	'Shift+KeyR': () => {
 		setState({ cReal: Math.max(-MAX_CONSTANT_COMPONENT, state.cReal - 0.01) });
 		showInfo(`C (real): ${state.cReal.toFixed(2)}`);
+	},
+	// Save frames.
+	KeyS: () => {
+		nFramesExported = 0;
+		showInfo(`Exporting frames…`);
 	},
 	// Maximum zoom in / out.
 	KeyZ: () => {
@@ -286,6 +291,9 @@ function updateStateFromHash() {
 // Some state doesn’t make sense to share, so it’s left out of the hash state.
 let resolutionMultiplier = 2;
 let showLabels = true;
+let nFramesExported = null;
+let paletteIdx = paletteIds.indexOf(state.paletteId);
+
 // Smoothed state values are kept in arrays so tween.js can work with them.
 const smoothedZoom = [state.zoom];
 const smoothedPosition = [state.xPosition, state.yPosition];
@@ -324,8 +332,8 @@ gl.imageSmoothingEnabled = false;
 
 const fragmentShaderInfo = createProgramInfo(gl, [vertexSource, fragmentSource]);
 
-let colors = new Float32Array(N_COLORS * 3);
-function updateColors(direction = 1) {
+const colors = new Float32Array(N_COLORS * 3);
+function updateColors(direction = 0) {
 	paletteIdx = (paletteIds.length + paletteIdx + direction) % paletteIds.length;
 	const paletteId = paletteIds[paletteIdx];
 	const palette = palettes[paletteId];
@@ -411,8 +419,23 @@ function render(time) {
 		u_colors: colors,
 	});
 	drawBufferInfo(gl, bufferInfo, gl.TRIANGLE_STRIP);
+
+	if (nFramesExported !== null) {
+		const image = canvas.toDataURL();
+		downloadLink.download = `fractal-export-${nFramesExported.toString().padStart(3, '0')}.png`;
+		downloadLink.href = image;
+		downloadLink.click();
+
+		if (++nFramesExported >= N_COLORS || !state.isPlaying) {
+			nFramesExported = null;
+			showInfo('Exported frames');
+		}
+	}
+
 	requestAnimationFrame(render);
 }
+
+const downloadLink = document.createElement('a');
 
 // Event listeners.
 const instructionsContainer = document.getElementById('instructions');
@@ -525,7 +548,6 @@ handleTouch(canvas, (direction, delta, additionalFingers) => {
 
 // Start it up.
 const nStateUpdates = updateStateFromHash();
-let paletteIdx = paletteIds.indexOf(state.paletteId);
 updateColors(0);
 requestAnimationFrame(render);
 
