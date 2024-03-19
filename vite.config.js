@@ -6,6 +6,6 @@ export default defineConfig({
 	build: {
 		outDir: '../dist',
 	},
-	base: '/julia/',
+	base: '/fractal/',
 	plugins: [glsl()],
 });
