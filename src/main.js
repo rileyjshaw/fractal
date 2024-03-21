@@ -10,9 +10,9 @@ import {
 import { tinykeys } from 'tinykeys';
 import { Tween, Easing } from '@tweenjs/tween.js';
 
-import palettes, { paletteIds } from './palettes';
-import { hexToNormalizedRGB, identity, parseNumber, throttle, updateHash } from './util';
-import handleTouch from './touch';
+import palettes, { paletteIds } from './palettes.js';
+import { hexToNormalizedRGB, identity, parseNumber, throttle, updateHash } from './util.js';
+import handleTouch from './touch.js';
 
 // Shaders.
 import vertexSource from './vertex.vert';

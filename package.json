@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "lint": "prettier --write src/**/*.{js,css,frag}"
+    "lint": "prettier --write src/**/*.{html,css,js,json,frag,vert}"
   },
   "devDependencies": {
     "prettier": "3.2.5",
