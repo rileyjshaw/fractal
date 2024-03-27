@@ -53,6 +53,7 @@ canvas {
 		system-ui,
 		sans-serif;
 	inset: 12px;
+	line-height: 1.5;
 	overflow: auto;
 	padding: 24px;
 	position: fixed;
@@ -61,7 +62,7 @@ canvas {
 #instructions > div {
 	height: 100%;
 	margin: auto;
-	max-width: 60em;
+	max-width: 48em;
 }
 
 h1,
@@ -91,6 +92,10 @@ p {
 
 ul {
 	padding-left: 1em;
+}
+
+li {
+	margin-bottom: 4px;
 }
 
 kbd {
