@@ -9,10 +9,14 @@ import {
 } from 'twgl-base.js';
 import { tinykeys } from 'tinykeys';
 import { Tween, Easing } from '@tweenjs/tween.js';
+import { registerSW } from 'virtual:pwa-register';
 
 import palettes, { paletteIds } from './palettes.js';
 import { hexToNormalizedRGB, identity, parseNumber, throttle, updateHash } from './util.js';
 import handleTouch from './touch.js';
+
+// Auto-update the service worker.
+registerSW({ immediate: true });
 
 // Shaders.
 import vertexSource from './vertex.vert';
