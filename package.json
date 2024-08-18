@@ -1,24 +1,26 @@
 {
-  "name": "fractal",
-  "private": true,
-  "version": "0.1.0",
-  "type": "module",
-  "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview",
-    "lint": "prettier --write src/**/*.{html,css,js,json,frag,vert}"
-  },
-  "devDependencies": {
-    "prettier": "3.3.3",
-    "prettier-plugin-glsl": "^0.2.0",
-    "vite": "^5.4.1",
-    "vite-plugin-glsl": "^1.3.0",
-    "vite-plugin-pwa": "^0.20.1"
-  },
-  "dependencies": {
-    "@tweenjs/tween.js": "^25.0.0",
-    "tinykeys": "^2.1.0",
-    "twgl-base.js": "^5.5.3"
-  }
+	"name": "fractal",
+	"private": true,
+	"version": "0.1.0",
+	"type": "module",
+	"scripts": {
+		"dev": "vite",
+		"build": "vite build",
+		"generate-pwa-assets": "pwa-assets-generator",
+		"preview": "vite preview",
+		"lint": "prettier --write src/**/*.{html,css,js,json,frag,vert}"
+	},
+	"devDependencies": {
+		"@vite-pwa/assets-generator": "^0.2.4",
+		"prettier": "3.3.3",
+		"prettier-plugin-glsl": "^0.2.0",
+		"vite": "^5.4.1",
+		"vite-plugin-glsl": "^1.3.0",
+		"vite-plugin-pwa": "^0.20.1"
+	},
+	"dependencies": {
+		"@tweenjs/tween.js": "^25.0.0",
+		"tinykeys": "^2.1.0",
+		"twgl-base.js": "^5.5.3"
+	}
 }
