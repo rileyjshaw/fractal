@@ -494,7 +494,7 @@ canvas.addEventListener('click', e => {
 canvas.addEventListener('wheel', e => {
 	const delta = Math.sign(e.deltaY) * 0.05;
 	zoomTween.stop();
-	setState({ zoom: Math.max(MIN_ZOOM_EXPONENT, Math.min(MAX_ZOOM_EXPONENT, smoothedZoom[0] + delta)) });
+	setState({ zoom: Math.max(MIN_ZOOM_EXPONENT, Math.min(MAX_ZOOM_EXPONENT, smoothedZoom[0] - delta)) });
 	smoothedZoom[0] = state.zoom;
 	// HACK(riley): Tween.js has a bug where stop() doesn’t work completely until the end is reached.
 	zoomTween.to([state.zoom], 0).end();
