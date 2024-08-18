@@ -404,8 +404,8 @@ function resize() {
 }
 
 function render(time) {
-	positionTween.update(time, false);
-	zoomTween.update(time, false);
+	positionTween.update(time);
+	zoomTween.update(time);
 	resize();
 	gl.bindFramebuffer(gl.FRAMEBUFFER, null); // Bind the default framebuffer (the screen).
 	gl.useProgram(fragmentShaderInfo.program);
