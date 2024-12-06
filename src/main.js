@@ -32,6 +32,12 @@ const MAX_EXPONENT = 16;
 const MAX_CONSTANT_COMPONENT = 2.5; // The maximum absolute value of the constant C’s real or imaginary component.
 const MIN_RESOLUTION_MULTIPLIER = 0.0625; // 6.25%.
 const MAX_RESOLUTION_MULTIPLIER = 2; // 200%.
+const MIN_ESCAPE_RADIUS = 0.8; // Just above 1 to avoid numerical issues
+const MAX_ESCAPE_RADIUS = 2;
+const MIN_SPACING = 0.1;
+const MAX_SPACING = 2.0;
+const MIN_SPEED = 0.1;
+const MAX_SPEED = 4;
 
 // Derived.
 const MIN_ZOOM_EXPONENT = Math.log(MIN_ZOOM) / Math.log(2);
@@ -94,6 +100,17 @@ tinykeys(window, {
 		zoomTween.to([MIN_ZOOM_EXPONENT], 500).startFromCurrentValues();
 		positionTween.to([0, 0], 2000).startFromCurrentValues();
 	},
+	// Increase/decrease escape radius.
+	KeyQ: () => {
+		const newValue = state.escapeRadius + 0.01;
+		setState({ escapeRadius: Math.min(MAX_ESCAPE_RADIUS, newValue === 1 ? 1.01 : newValue) });
+		showInfo(`Escape radius: ${state.escapeRadius.toFixed(2)}`);
+	},
+	'Shift+KeyQ': () => {
+		const newValue = state.escapeRadius - 0.01;
+		setState({ escapeRadius: Math.max(MIN_ESCAPE_RADIUS, newValue === 0 ? 0.01 : newValue) });
+		showInfo(`Escape radius: ${state.escapeRadius.toFixed(2)}`);
+	},
 	// Increase / decrease real component.
 	KeyR: () => {
 		setState({ cReal: Math.min(MAX_CONSTANT_COMPONENT, state.cReal + 0.01) });
@@ -103,8 +120,31 @@ tinykeys(window, {
 		setState({ cReal: Math.max(-MAX_CONSTANT_COMPONENT, state.cReal - 0.01) });
 		showInfo(`C (real): ${state.cReal.toFixed(2)}`);
 	},
-	// Save frames.
+	// Speed control.
 	KeyS: () => {
+		setState({ speed: Math.min(MAX_SPEED, state.speed + 0.1) });
+		showInfo(`Speed: ${state.speed.toFixed(1)}`);
+	},
+	'Shift+KeyS': () => {
+		setState({ speed: Math.max(MIN_SPEED, state.speed - 0.1) });
+		showInfo(`Speed: ${state.speed.toFixed(1)}`);
+	},
+	// Transition smoothing.
+	KeyT: () => {
+		setState({ transitionSmoothing: 1 - state.transitionSmoothing });
+		showInfo(`Transition smoothing: ${state.transitionSmoothing ? 'on' : 'off'}`);
+	},
+	// Spacing control.
+	KeyU: () => {
+		setState({ spacing: Math.min(MAX_SPACING, state.spacing + 0.01) });
+		showInfo(`Spacing: ${state.spacing.toFixed(2)}`);
+	},
+	'Shift+KeyU': () => {
+		setState({ spacing: Math.max(MIN_SPACING, state.spacing - 0.01) });
+		showInfo(`Spacing: ${state.spacing.toFixed(2)}`);
+	},
+	// Save frames.
+	KeyV: () => {
 		nFramesExported = 0;
 		showInfo(`Exporting frames…`);
 	},
@@ -197,17 +237,21 @@ tinykeys(window, {
 
 const [state, shortKeys, stateParsers] = Object.entries({
 	// Format: [default value, short key, parser]
-	cReal: [-0.71, 'R', parseNumber],
-	cImaginary: [-0.43, 'I', parseNumber],
 	paletteId: [paletteIds[0], 'C'],
+	animationDirection: [1, 'D', parseNumber],
 	exponent: [2, 'E', parseNumber],
+	fractalType: [0, 'F', parseNumber],
+	forceHelp: [0, 'H', parseNumber],
+	cImaginary: [-0.43, 'I', parseNumber],
+	isPlaying: [1, 'P', parseNumber],
+	escapeRadius: [2, 'Q', parseNumber],
+	cReal: [-0.71, 'R', parseNumber],
+	speed: [1, 'S', parseNumber],
+	transitionSmoothing: [0, 'T', parseNumber],
+	spacing: [0.2, 'U', parseNumber],
 	xPosition: [0, 'X', parseNumber],
 	yPosition: [0, 'Y', parseNumber],
 	zoom: [MIN_ZOOM_EXPONENT, 'Z', parseNumber],
-	fractalType: [0, 'F', parseNumber],
-	isPlaying: [1, 'P', parseNumber],
-	animationDirection: [1, 'D', parseNumber],
-	forceHelp: [0, 'H', parseNumber],
 }).reduce(
 	([state, shortKeys, stateParsers], [key, [value, shortKey, parser]]) => {
 		state[key] = value;
@@ -411,10 +455,14 @@ function render(time) {
 	gl.useProgram(fragmentShaderInfo.program);
 	setBuffersAndAttributes(gl, fragmentShaderInfo, bufferInfo);
 
+	const frame = state.isPlaying
+		? (colors.length + ((time * state.animationDirection * state.speed) / 62.5) * state.spacing) % colors.length
+		: 0;
+
 	// Pass data to the fragment shader.
 	setUniforms(fragmentShaderInfo, {
 		u_resolution: [gl.canvas.width, gl.canvas.height],
-		u_frame: state.isPlaying ? colors.length + (((time * state.animationDirection) / 62.5) % colors.length) : 0, // 16 fps.
+		u_frame: frame,
 		u_center: smoothedPosition,
 		u_zoom: Math.pow(2, smoothedZoom[0]),
 		u_fractalType: state.fractalType,
@@ -422,6 +470,10 @@ function render(time) {
 		u_cReal: state.cReal,
 		u_cImaginary: state.cImaginary,
 		u_colors: colors,
+		u_transitionSmoothing: state.transitionSmoothing,
+		u_escapeRadius: state.escapeRadius,
+		u_logEscapeRadius: Math.log(state.escapeRadius),
+		u_spacing: state.spacing,
 	});
 	drawBufferInfo(gl, bufferInfo, gl.TRIANGLE_STRIP);
 
