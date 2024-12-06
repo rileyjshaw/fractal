@@ -587,18 +587,21 @@ handleTouch(canvas, (direction, delta, additionalFingers) => {
 			if (Math.abs(delta) < 32) return { skip: true };
 			setState({ exponent: Math.max(MIN_EXPONENT, Math.min(MAX_EXPONENT, state.exponent + Math.sign(delta))) });
 		} else {
-			if (Math.abs(delta) < 64) return { skip: true };
-			setState({ animationDirection: Math.sign(delta) });
+			setState({
+				escapeRadius: Math.max(
+					MIN_ESCAPE_RADIUS,
+					Math.min(MAX_ESCAPE_RADIUS, state.escapeRadius + delta * 0.01),
+				),
+			});
 		}
 	} else if (additionalFingers === 4) {
 		if (direction === 'x') {
 			if (Math.abs(delta) < 64) return { skip: true };
-			resetState();
-		} else {
-			if (Math.abs(delta) < 64) return { skip: true };
 			setState({
 				fractalType: (FRACTAL_TYPES.length + state.fractalType + Math.sign(delta)) % FRACTAL_TYPES.length,
 			});
+		} else {
+			setState({ speed: Math.max(MIN_SPEED, Math.min(MAX_SPEED, state.speed - delta * 0.01)) });
 		}
 	}
 });
