@@ -1,7 +1,12 @@
-import { GMPUtils } from './gmpUtils.js';
+import { GMPUtils, maxAbsWide, multiplyWide, toFloat } from './gmpUtils.js';
 
+// One RGBA32F texel per orbit step: R = real, G = imag, B = scale exponent, A = reserved.
+// The 4th channel is currently unused (zero-padded); reserve it for future per-step data
+// (e.g. precomputed series-approximation polynomial flags) without changing the texel layout.
 const ORBIT_TEXTURE_SIZE = 1024;
-const ORBIT_TEXTURE_LENGTH = ORBIT_TEXTURE_SIZE * ORBIT_TEXTURE_SIZE;
+const ORBIT_TEXTURE_CHANNELS = 4;
+const ORBIT_TEXTURE_PIXELS = ORBIT_TEXTURE_SIZE * ORBIT_TEXTURE_SIZE;
+const ORBIT_TEXTURE_LENGTH = ORBIT_TEXTURE_PIXELS * ORBIT_TEXTURE_CHANNELS;
 const FRACTAL_TYPE_JULIA = 0;
 const FRACTAL_TYPE_MANDELBROT = 1;
 const SUPPORTED_FRACTAL_TYPES = new Set([FRACTAL_TYPE_JULIA, FRACTAL_TYPE_MANDELBROT]);
@@ -147,9 +152,18 @@ export class DeepZoomManager {
 	}
 
 	buildOrbitTextureData(orbit) {
+		// Repack the tightly interleaved (x, y, scale) orbit into one RGBA32F texel per
+		// step (x, y, scale, 0). One fetch per inner-loop iteration replaces three.
+		const orbitSteps = Math.floor(orbit.length / 3);
+		const capacity = Math.min(orbitSteps, ORBIT_TEXTURE_PIXELS);
 		const textureData = new Float32Array(ORBIT_TEXTURE_LENGTH);
-		textureData.fill(-1);
-		textureData.set(orbit.subarray(0, Math.min(orbit.length, textureData.length)));
+		for (let i = 0; i < capacity; i++) {
+			const src = i * 3;
+			const dst = i * ORBIT_TEXTURE_CHANNELS;
+			textureData[dst] = orbit[src];
+			textureData[dst + 1] = orbit[src + 1];
+			textureData[dst + 2] = orbit[src + 2];
+		}
 		return textureData;
 	}
 
@@ -162,14 +176,68 @@ export class DeepZoomManager {
 		};
 	}
 
-	getShaderUniforms() {
+	getShaderUniforms(currentRadiusMantissa, currentRadiusExponent) {
 		if (!this.referenceData) return null;
+		// Series approximation is enabled only for Mandelbrot exp 2 (the polynomial
+		// recurrence in gmpUtils currently bakes Mandelbrot's `+ 1` term, which is
+		// incorrect for Julia). For Julia we report zero polynomial coverage so the
+		// shader simply skips the warm start.
+		const compatibilitySignature = this.referenceState?.compatibilitySignature;
+		const isMandelbrotQuadratic = compatibilitySignature?.startsWith(`${FRACTAL_TYPE_MANDELBROT}|2|`) ?? false;
+		const polynomialLimit = isMandelbrotQuadratic ? this.referenceData.polynomialLimit : 0;
+
+		// Rebake the polynomial coefficients against the *current* view radius (rather
+		// than the radius captured at reference-orbit compute time). The wide-form
+		// polynomialWide is constant w.r.t. zoom (it only depends on the reference
+		// orbit), but the linear/quadratic/cubic radius factors and the polyScale
+		// normalization must be recomputed each frame so the shader's
+		// `2^(pse + radiusExponent)` rescale matches the stored coefficients.
+		const radiusMantissa = currentRadiusMantissa ?? this.referenceData.radiusMantissa;
+		const radiusExponent = currentRadiusExponent ?? this.referenceData.radiusExponent;
+		const polynomialWide = this.referenceData.polynomialWide;
+		const linearScale = [radiusMantissa, 0];
+		const quadraticScale = [radiusMantissa * radiusMantissa, radiusExponent];
+		const cubicScale = [radiusMantissa * radiusMantissa * radiusMantissa, radiusExponent * 2];
+		const linearWideX = multiplyWide(linearScale, polynomialWide[0]);
+		const linearWideY = multiplyWide(linearScale, polynomialWide[1]);
+		const quadraticWideX = multiplyWide(quadraticScale, polynomialWide[2]);
+		const quadraticWideY = multiplyWide(quadraticScale, polynomialWide[3]);
+		const cubicWideX = multiplyWide(cubicScale, polynomialWide[4]);
+		const cubicWideY = multiplyWide(cubicScale, polynomialWide[5]);
+		// Normalize by the largest of the three radius-scaled coefficient magnitudes
+		// so all three terms fit cleanly in float32 once stored. Picking just |B'|
+		// (as we previously did) overflows |C'| or |D'| at deep zoom when the cubic
+		// term's accumulated exponent exceeds float32 range.
+		const linearMaxAbs = maxAbsWide(linearWideX, linearWideY);
+		const quadraticMaxAbs = maxAbsWide(quadraticWideX, quadraticWideY);
+		const cubicMaxAbs = maxAbsWide(cubicWideX, cubicWideY);
+		const linearExp = linearMaxAbs[0] !== 0 ? linearMaxAbs[1] : -Infinity;
+		const quadraticExp = quadraticMaxAbs[0] !== 0 ? quadraticMaxAbs[1] : -Infinity;
+		const cubicExp = cubicMaxAbs[0] !== 0 ? cubicMaxAbs[1] : -Infinity;
+		const finiteExp = Math.max(
+			Number.isFinite(linearExp) ? linearExp : -1024,
+			Number.isFinite(quadraticExp) ? quadraticExp : -1024,
+			Number.isFinite(cubicExp) ? cubicExp : -1024,
+		);
+		const polyScaleExponent = finiteExp;
+		const polyScale = [1, -polyScaleExponent];
+
 		return {
 			u_orbitLength: this.referenceData.orbitLength,
-			u_poly1: Array.from(this.referenceData.poly1),
-			u_poly2: Array.from(this.referenceData.poly2),
-			u_radiusMantissa: this.referenceData.radiusMantissa,
-			u_radiusExponent: this.referenceData.radiusExponent,
+			u_poly1: [
+				toFloat(multiplyWide(polyScale, linearWideX)),
+				toFloat(multiplyWide(polyScale, linearWideY)),
+				toFloat(multiplyWide(polyScale, quadraticWideX)),
+				toFloat(multiplyWide(polyScale, quadraticWideY)),
+			],
+			u_poly2: [
+				toFloat(multiplyWide(polyScale, cubicWideX)),
+				toFloat(multiplyWide(polyScale, cubicWideY)),
+			],
+			u_polynomialLimit: polynomialLimit,
+			u_polyScaleExponent: polyScaleExponent,
+			u_radiusMantissa: radiusMantissa,
+			u_radiusExponent: radiusExponent,
 		};
 	}
 

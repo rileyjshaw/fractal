@@ -13,19 +13,21 @@ uniform float u_colorScale;
 
 out vec4 outColor;
 
+// Metric layout (set by perturbationShader/fractal.frag buildMetric/buildDistanceMetric):
+//   .x = smoothed iteration count
+//   .y = signed boundary/detail signal (range [-0.5, 0.5], typically [0, 0.5] near escape)
+//   .z = combined brightness multiplier (detail brightness * slope brightness)
+//   .w = sub-pixel coverage in [0, 1]; 0 = interior, 1 = clearly outside set
 vec3 getPaletteColor(vec4 metric) {
-	float detail = (metric.y - 0.5) * metric.z;
-	float colorIdx = metric.x * u_colorScale + detail * 1.4 + u_paletteFrame;
+	float signedDetail = metric.y;
+	float colorIdx = metric.x * u_colorScale + signedDetail * 1.4 + u_paletteFrame;
 	float wrappedIdx = mod(floor(colorIdx), float(N_COLORS));
 	float t = fract(colorIdx);
 	int fromIdx = int(wrappedIdx);
 	int toIdx = (fromIdx + 1) % N_COLORS;
-	vec3 color = mix(u_colors[fromIdx], u_colors[toIdx], t);
-	color *= mix(1.0, mix(0.82, 1.16, metric.y), metric.z);
-	if (metric.w < 0.5) {
-		color = mix(u_colors[0], u_colors[1], metric.y) * 0.18;
-	}
-	return clamp(color, 0.0, 1.0);
+	vec3 outsideColor = mix(u_colors[fromIdx], u_colors[toIdx], t) * metric.z;
+	vec3 insideColor = mix(u_colors[0], u_colors[1], 0.5 + signedDetail) * 0.18;
+	return clamp(mix(insideColor, outsideColor, metric.w), 0.0, 1.0);
 }
 
 void main() {

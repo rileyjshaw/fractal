@@ -4,7 +4,7 @@ const DEFAULT_PRECISION = 1200;
 const ORBIT_CAPACITY = Math.floor((1024 * 1024) / 3);
 const FRACTAL_TYPE_JULIA = 0;
 
-function cloneWide([mantissa, exponent]) {
+export function cloneWide([mantissa, exponent]) {
 	return [mantissa, exponent];
 }
 
@@ -32,7 +32,7 @@ function subtractWide(a, b) {
 	return [am - bm, resultExponent];
 }
 
-function multiplyWide(a, b) {
+export function multiplyWide(a, b) {
 	const [am, ae] = a;
 	const [bm, be] = b;
 	let mantissa = am * bm;
@@ -47,7 +47,7 @@ function multiplyWide(a, b) {
 	return [mantissa, exponent];
 }
 
-function maxAbsWide(a, b) {
+export function maxAbsWide(a, b) {
 	let [am, ae] = a;
 	let [bm, be] = b;
 	const resultExponent = Math.max(ae, be);
@@ -71,7 +71,7 @@ function greaterThanWide(a, b) {
 	return am > bm;
 }
 
-function toFloat(wide) {
+export function toFloat(wide) {
 	return wide[0] * Math.pow(2, wide[1]);
 }
 
@@ -437,28 +437,17 @@ export class GMPUtils {
 				throw new Error('No iterations completed in orbit computation');
 			}
 
-			const polyScaleExponent = maxAbsWide(polynomial[0], polynomial[1])[1];
-			const polyScale = [1, -polyScaleExponent];
 			const [radiusMantissa, radiusExponent] = radiusWide;
-			const linearScale = [radiusMantissa, 0];
-			const quadraticScale = [radiusMantissa * radiusMantissa, radiusExponent];
-			const cubicScale = [radiusMantissa * radiusMantissa * radiusMantissa, radiusExponent * 2];
 
+			// Return the polynomial in its un-radius-scaled wide form. The radius factors
+			// (linear/quadratic/cubic) and the polyScale-exponent normalization are applied
+			// per-frame in deepZoom.getShaderUniforms against the *current* view radius;
+			// baking them in here would lock the polynomial to the reference-time radius
+			// and distort the perturbation evaluation as the user zooms.
 			return {
 				orbit: orbit.subarray(0, actualIterations * 3),
 				orbitLength: actualIterations,
-				poly1: new Float32Array([
-					toFloat(multiplyWide(polyScale, multiplyWide(linearScale, polynomial[0]))),
-					toFloat(multiplyWide(polyScale, multiplyWide(linearScale, polynomial[1]))),
-					toFloat(multiplyWide(polyScale, multiplyWide(quadraticScale, polynomial[2]))),
-					toFloat(multiplyWide(polyScale, multiplyWide(quadraticScale, polynomial[3]))),
-				]),
-				poly2: new Float32Array([
-					toFloat(multiplyWide(polyScale, multiplyWide(cubicScale, polynomial[4]))),
-					toFloat(multiplyWide(polyScale, multiplyWide(cubicScale, polynomial[5]))),
-					polynomialLimit,
-					polyScaleExponent,
-				]),
+				polynomialWide: polynomial,
 				polynomialLimit,
 				radiusMantissa,
 				radiusExponent,
