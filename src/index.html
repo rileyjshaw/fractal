@@ -8,7 +8,7 @@
 		<link rel="apple-touch-icon" href="/fractal/apple-touch-icon-180x180.png" />
 	</head>
 	<body>
-		<canvas id="canvas"></canvas>
+		<div id="canvas-container"></div>
 		<button id="show-instructions">?</button>
 		<div id="instructions">
 			<div>
@@ -18,8 +18,9 @@
 					explore, so you can share discoveries just by copying the page address.
 				</p>
 				<p>
-					It’s a naive GPU implementation that doesn’t allow for arbitrary precision. This means that it loses
-					resolution at a fairly shallow zoom depth of ~100000x.
+					It’s a GPU-driven fractal explorer with an experimental deep zoom path. The standard renderer still
+					hits floating point limits at relatively shallow depths, and deep zoom currently focuses on
+					validated Mandelbrot cases first.
 				</p>
 				<div id="desktop-controls" class="show">
 					<div class="controls-heading">
@@ -33,21 +34,21 @@
 						<li><kbd>D</kbd>: Increase pixel density (decrease with <kbd>Shift</kbd> + <kbd>D</kbd>)</li>
 						<li><kbd>E</kbd>: Increase exponent (decrease with <kbd>Shift</kbd> + <kbd>E</kbd>)</li>
 						<li><kbd>F</kbd>: Change fractal type</li>
+						<li><kbd>G</kbd>: Increase color density (decrease with <kbd>Shift</kbd> + <kbd>G</kbd>)</li>
 						<li>
 							<kbd>I</kbd>: Increase constant imaginary component (decrease with <kbd>Shift</kbd> +
 							<kbd>I</kbd>) (does not affect Mandelbrot or Burning Ship sets)
 						</li>
 						<li><kbd>L</kbd>: Show / hide command labels</li>
 						<li><kbd>O</kbd>: Reset center to origin</li>
-						<li><kbd>Q</kbd>: Increase escape radius (decrease with <kbd>Shift</kbd> + <kbd>P</kbd>)</li>
+						<li><kbd>Q</kbd>: Increase escape radius (decrease with <kbd>Shift</kbd> + <kbd>Q</kbd>)</li>
 						<li>
 							<kbd>R</kbd>: Increase constant real component (decrease with <kbd>Shift</kbd> +
 							<kbd>R</kbd>) (does not affect Mandelbrot or Burning Ship sets)
 						</li>
 						<li><kbd>S</kbd>: Increase animation speed (decrease with <kbd>Shift</kbd> + <kbd>S</kbd>)</li>
-						<li><kbd>T</kbd>: Toggle transition smoothing</li>
+						<li><kbd>T</kbd>: Toggle transition smoothing (on by default)</li>
 						<li><kbd>U</kbd>: Increase band spacing (decrease with <kbd>Shift</kbd> + <kbd>U</kbd>)</li>
-						<li><kbd>V</kbd>: Save frame(s)</li>
 						<li><kbd>X</kbd>: Clear state</li>
 						<li><kbd>Z</kbd>: Zoom in slowly (zoom out with <kbd>Shift</kbd> + <kbd>Z</kbd>)</li>
 						<li><kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd>: Fine-adjust image center</li>
@@ -55,6 +56,7 @@
 							<kbd>Space</kbd>: Play / pause animation (change direction with <kbd>Shift</kbd> +
 							<kbd>Space</kbd>)
 						</li>
+						<li><kbd>Enter</kbd>: Save the active frame</li>
 						<li><kbd>?</kbd>: Show this info pane</li>
 						<li><kbd>Esc</kbd>: Hide this info pane</li>
 					</ul>

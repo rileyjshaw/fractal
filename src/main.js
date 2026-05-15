@@ -1,64 +1,115 @@
-import {
-	createProgramInfo,
-	createBufferInfoFromArrays,
-	createTexture,
-	drawBufferInfo,
-	resizeCanvasToDisplaySize,
-	setBuffersAndAttributes,
-	setUniforms,
-} from 'twgl-base.js';
+import ShaderPad from 'shaderpad';
+import { createFullscreenCanvas, save } from 'shaderpad/util';
 import { tinykeys } from 'tinykeys';
 import { Tween, Easing } from '@tweenjs/tween.js';
 import { registerSW } from 'virtual:pwa-register';
 
 import palettes, { paletteIds } from './palettes.js';
-import { hexToNormalizedRGB, identity, parseNumber, throttle, updateHash } from './util.js';
+import { debounce, hexToNormalizedRGB, identity, parseNumber, updateHash } from './util.js';
 import handleTouch from './touch.js';
+import { DeepZoomManager } from './deepZoom.js';
+import { generateDeepDisplayShader } from './deepDisplayShader.js';
+import { generatePerturbationShader } from './perturbationShader.js';
 
 // Auto-update the service worker.
 registerSW({ immediate: true });
 
-// Shaders.
-import vertexSource from './vertex.vert';
 import fragmentSource from './fractal.frag';
 
 import './style.css';
 
 const N_COLORS = 32;
 const MIN_ZOOM = 1;
-const MAX_ZOOM = 98304;
+const STANDARD_RENDER_SAFE_MAX_ZOOM = 1e12;
+const MAX_ZOOM_DECIMAL_EXPONENT = 400;
+const DEEP_ZOOM_THRESHOLD = 16;
 const MIN_EXPONENT = 2;
 const MAX_EXPONENT = 16;
-const MAX_CONSTANT_COMPONENT = 2.5; // The maximum absolute value of the constant C’s real or imaginary component.
-const MIN_RESOLUTION_MULTIPLIER = 0.0625; // 6.25%.
-const MAX_RESOLUTION_MULTIPLIER = 2; // 200%.
-const MIN_ESCAPE_RADIUS = 0.8; // Just above 1 to avoid numerical issues
+const MAX_CONSTANT_COMPONENT = 2.5;
+const MIN_RESOLUTION_MULTIPLIER = 0.0625;
+const MAX_RESOLUTION_MULTIPLIER = 2;
+const MIN_ESCAPE_RADIUS = 0.8;
 const MAX_ESCAPE_RADIUS = 2;
 const MIN_SPACING = 0.1;
 const MAX_SPACING = 2.0;
+const MIN_COLOR_SCALE = 0.02;
+const MAX_COLOR_SCALE = 1.0;
 const MIN_SPEED = 0.1;
 const MAX_SPEED = 4;
+const BASE_ITERATIONS = 256;
+const DEEP_MIN_ITERATIONS = 2048;
+const DEEP_MAX_ITERATIONS = 24576;
+const DEEP_ITERATION_ZOOM_FACTOR = 192;
+const DEEP_ITERATION_QUANTUM = 256;
+const DEEP_COMPATIBLE_REFERENCE_MAX_OFFSET = 2.5;
+const DEEP_REFERENCE_RECENTER_OFFSET = 0.75;
+// Start computing the deep reference orbit this many zoom units before crossing the
+// deep-zoom threshold so the orbit is ready by the time the user actually needs it.
+const DEEP_ZOOM_PREPARATION_MARGIN_EXPONENT = 3;
+// When the orbit is computed (whether preemptively or on demand), target an
+// iteration count covering a few more zoom units of headroom, so subsequent
+// zooming-in doesn't immediately trigger another recompute and stall.
+const DEEP_REFERENCE_ITERATION_HEADROOM_EXPONENT = 4;
+const DEEP_INTERACTION_RESOLUTION_MULTIPLIER = 0.33;
+const DEEP_INTERACTION_RESOLUTION_RESTORE_DEBOUNCE_MS = 200;
+const URL_CENTER_GUARD_DECIMAL_DIGITS = 6;
 
-// Derived.
-const MIN_ZOOM_EXPONENT = Math.log(MIN_ZOOM) / Math.log(2);
-const MAX_ZOOM_EXPONENT = Math.log(MAX_ZOOM) / Math.log(2);
+const ORBIT_TEXTURE_OPTIONS = {
+	internalFormat: 'R32F',
+	format: 'RED',
+	type: 'FLOAT',
+	minFilter: 'NEAREST',
+	magFilter: 'NEAREST',
+	wrapS: 'CLAMP_TO_EDGE',
+	wrapT: 'CLAMP_TO_EDGE',
+	preserveY: false,
+};
+
+const METRIC_TEXTURE_OPTIONS = {
+	internalFormat: 'RGBA32F',
+	format: 'RGBA',
+	type: 'FLOAT',
+	minFilter: 'NEAREST',
+	magFilter: 'NEAREST',
+	wrapS: 'CLAMP_TO_EDGE',
+	wrapT: 'CLAMP_TO_EDGE',
+	preserveY: false,
+};
 
 const FRACTAL_TYPES = ['Julia', 'Mandelbrot', 'Burning Ship', 'Mandala'];
 
+const MIN_ZOOM_EXPONENT = Math.log(MIN_ZOOM) / Math.log(2);
+const MAX_ZOOM_EXPONENT = MAX_ZOOM_DECIMAL_EXPONENT / Math.log10(2);
+const STANDARD_RENDER_SAFE_ZOOM_EXPONENT = Math.log(STANDARD_RENDER_SAFE_MAX_ZOOM) / Math.log(2);
+
+const deepZoomManager = new DeepZoomManager({ threshold: DEEP_ZOOM_THRESHOLD });
+
+let resolutionMultiplier = 1;
+let standardRenderer = null;
+let deepIterationRenderer = null;
+let deepDisplayRenderer = null;
+let lastUploadedDeepOrbitSignature = null;
+let lastDeepIterationRenderSignature = null;
+let lastUnsupportedDeepZoomReason = null;
+let lastDeepZoomActive = false;
+let activeRenderer = null;
+let activeResolutionMultiplier = resolutionMultiplier;
+let isDeepInteractionResolutionReduced = false;
+let colorsVersion = 0;
+let standardRendererColorsVersion = -1;
+let deepDisplayRendererColorsVersion = -1;
+
 tinykeys(window, {
-	// Change colors.
 	KeyC: () => updateColors(1),
 	'Shift+KeyC': () => updateColors(-1),
-	// Increase / decrease resolution density.
 	KeyD: () => {
-		resolutionMultiplier = Math.min(MAX_RESOLUTION_MULTIPLIER, resolutionMultiplier * 2);
+		setResolutionMultiplier(resolutionMultiplier * 2);
 		showInfo(`Density: ${resolutionMultiplier * 100}%`);
 	},
 	'Shift+KeyD': () => {
-		resolutionMultiplier = Math.max(MIN_RESOLUTION_MULTIPLIER, resolutionMultiplier / 2);
+		setResolutionMultiplier(resolutionMultiplier / 2);
 		showInfo(`Density: ${resolutionMultiplier * 100}%`);
 	},
-	// Increase / decrease set exponent.
 	KeyE: () => {
 		setState({ exponent: Math.min(MAX_EXPONENT, state.exponent + 1) });
 		showInfo(`Exponent: ${state.exponent}`);
@@ -67,7 +118,6 @@ tinykeys(window, {
 		setState({ exponent: Math.max(MIN_EXPONENT, state.exponent - 1) });
 		showInfo(`Exponent: ${state.exponent}`);
 	},
-	// Change fractal type.
 	KeyF: () => {
 		setState({ fractalType: (state.fractalType + 1) % FRACTAL_TYPES.length });
 		showInfo(`Fractal type: ${FRACTAL_TYPES[state.fractalType]}`);
@@ -76,7 +126,16 @@ tinykeys(window, {
 		setState({ fractalType: (FRACTAL_TYPES.length + (state.fractalType - 1)) % FRACTAL_TYPES.length });
 		showInfo(`Fractal type: ${FRACTAL_TYPES[state.fractalType]}`);
 	},
-	// Increase / decrease imaginary component.
+	KeyG: () => {
+		const colorScale = Math.min(MAX_COLOR_SCALE, state.colorScale * 1.15);
+		setState({ colorScale });
+		showInfo(`Color density: ${colorScale.toFixed(3)}`);
+	},
+	'Shift+KeyG': () => {
+		const colorScale = Math.max(MIN_COLOR_SCALE, state.colorScale / 1.15);
+		setState({ colorScale });
+		showInfo(`Color density: ${colorScale.toFixed(3)}`);
+	},
 	KeyI: () => {
 		setState({ cImaginary: Math.min(MAX_CONSTANT_COMPONENT, state.cImaginary + 0.01) });
 		showInfo(`C (imaginary): ${state.cImaginary.toFixed(2)}`);
@@ -85,22 +144,21 @@ tinykeys(window, {
 		setState({ cImaginary: Math.max(-MAX_CONSTANT_COMPONENT, state.cImaginary - 0.01) });
 		showInfo(`C (imaginary): ${state.cImaginary.toFixed(2)}`);
 	},
-	// Show / hide labels.
 	KeyL: () => {
 		showLabels = !showLabels;
 		if (showLabels) {
 			showInfo('Labels on');
 		}
 	},
-	// Reset position to origin.
 	KeyO: () => {
 		zoomTween.stop();
 		positionTween.stop();
-		setState({ xPosition: 0, yPosition: 0, zoom: MIN_ZOOM_EXPONENT });
+		setPreciseCenterState('0', '0', { syncSmoothed: true, persist: false });
+		setZoomState(MIN_ZOOM_EXPONENT, { syncSmoothed: isPreciseNavigationActive(), persist: true });
+		if (isPreciseNavigationActive()) return;
 		zoomTween.to([MIN_ZOOM_EXPONENT], 500).startFromCurrentValues();
 		positionTween.to([0, 0], 2000).startFromCurrentValues();
 	},
-	// Increase/decrease escape radius.
 	KeyQ: () => {
 		const newValue = state.escapeRadius + 0.01;
 		setState({ escapeRadius: Math.min(MAX_ESCAPE_RADIUS, newValue === 1 ? 1.01 : newValue) });
@@ -111,7 +169,6 @@ tinykeys(window, {
 		setState({ escapeRadius: Math.max(MIN_ESCAPE_RADIUS, newValue === 0 ? 0.01 : newValue) });
 		showInfo(`Escape radius: ${state.escapeRadius.toFixed(2)}`);
 	},
-	// Increase / decrease real component.
 	KeyR: () => {
 		setState({ cReal: Math.min(MAX_CONSTANT_COMPONENT, state.cReal + 0.01) });
 		showInfo(`C (real): ${state.cReal.toFixed(2)}`);
@@ -120,7 +177,6 @@ tinykeys(window, {
 		setState({ cReal: Math.max(-MAX_CONSTANT_COMPONENT, state.cReal - 0.01) });
 		showInfo(`C (real): ${state.cReal.toFixed(2)}`);
 	},
-	// Speed control.
 	KeyS: () => {
 		setState({ speed: Math.min(MAX_SPEED, state.speed + 0.1) });
 		showInfo(`Speed: ${state.speed.toFixed(1)}`);
@@ -129,12 +185,10 @@ tinykeys(window, {
 		setState({ speed: Math.max(MIN_SPEED, state.speed - 0.1) });
 		showInfo(`Speed: ${state.speed.toFixed(1)}`);
 	},
-	// Transition smoothing.
 	KeyT: () => {
 		setState({ transitionSmoothing: 1 - state.transitionSmoothing });
 		showInfo(`Transition smoothing: ${state.transitionSmoothing ? 'on' : 'off'}`);
 	},
-	// Spacing control.
 	KeyU: () => {
 		setState({ spacing: Math.min(MAX_SPACING, state.spacing + 0.01) });
 		showInfo(`Spacing: ${state.spacing.toFixed(2)}`);
@@ -143,82 +197,49 @@ tinykeys(window, {
 		setState({ spacing: Math.max(MIN_SPACING, state.spacing - 0.01) });
 		showInfo(`Spacing: ${state.spacing.toFixed(2)}`);
 	},
-	// Save frames.
-	KeyV: () => {
-		nFramesExported = 0;
-		showInfo(`Exporting frames…`);
-	},
-	// Maximum zoom in / out.
 	KeyZ: () => {
 		zoomTween.stop();
-		setState({ zoom: MAX_ZOOM_EXPONENT });
+		if (isPreciseNavigationActive()) {
+			setZoomState(MAX_ZOOM_EXPONENT, { syncSmoothed: true, persist: true });
+			return;
+		}
+		setZoomState(MAX_ZOOM_EXPONENT, { syncSmoothed: false, persist: true });
 		zoomTween.to([MAX_ZOOM_EXPONENT], 20000).startFromCurrentValues();
 	},
 	'Shift+KeyZ': () => {
 		zoomTween.stop();
-		setState({ zoom: MIN_ZOOM_EXPONENT });
+		if (isPreciseNavigationActive()) {
+			setZoomState(MIN_ZOOM_EXPONENT, { syncSmoothed: true, persist: true });
+			return;
+		}
+		setZoomState(MIN_ZOOM_EXPONENT, { syncSmoothed: false, persist: true });
 		zoomTween.to([MIN_ZOOM_EXPONENT], 20000).startFromCurrentValues();
 	},
-	// Reset state.
 	KeyX: resetState,
-	// Pan position.
 	ArrowUp: () => {
-		positionTween.stop();
-		setState({ yPosition: smoothedPosition[1] + 0.005 / Math.pow(2, smoothedZoom[0]) });
-		smoothedPosition[1] = state.yPosition;
-		// HACK(riley): Tween.js has a bug where stop() doesn’t work completely until the end is reached.
-		positionTween.to([state.xPosition, state.yPosition], 0).end();
+		translateViewCenter(0, 0.005);
 	},
 	'Shift+ArrowUp': () => {
-		positionTween.stop();
-		setState({ yPosition: smoothedPosition[1] + 0.05 / Math.pow(2, smoothedZoom[0]) });
-		smoothedPosition[1] = state.yPosition;
-		// HACK(riley): Tween.js has a bug where stop() doesn’t work completely until the end is reached.
-		positionTween.to([state.xPosition, state.yPosition], 0).end();
+		translateViewCenter(0, 0.05);
 	},
 	ArrowDown: () => {
-		positionTween.stop();
-		setState({ yPosition: smoothedPosition[1] - 0.005 / Math.pow(2, smoothedZoom[0]) });
-		smoothedPosition[1] = state.yPosition;
-		// HACK(riley): Tween.js has a bug where stop() doesn’t work completely until the end is reached.
-		positionTween.to([state.xPosition, state.yPosition], 0).end();
+		translateViewCenter(0, -0.005);
 	},
 	'Shift+ArrowDown': () => {
-		positionTween.stop();
-		setState({ yPosition: smoothedPosition[1] - 0.05 / Math.pow(2, smoothedZoom[0]) });
-		smoothedPosition[1] = state.yPosition;
-		// HACK(riley): Tween.js has a bug where stop() doesn’t work completely until the end is reached.
-		positionTween.to([state.xPosition, state.yPosition], 0).end();
+		translateViewCenter(0, -0.05);
 	},
 	ArrowLeft: () => {
-		positionTween.stop();
-		setState({ xPosition: smoothedPosition[0] - 0.005 / Math.pow(2, smoothedZoom[0]) });
-		smoothedPosition[0] = state.xPosition;
-		// HACK(riley): Tween.js has a bug where stop() doesn’t work completely until the end is reached.
-		positionTween.to([state.xPosition, state.yPosition], 0).end();
+		translateViewCenter(-0.005, 0);
 	},
 	'Shift+ArrowLeft': () => {
-		positionTween.stop();
-		setState({ xPosition: smoothedPosition[0] - 0.05 / Math.pow(2, smoothedZoom[0]) });
-		smoothedPosition[0] = state.xPosition;
-		// HACK(riley): Tween.js has a bug where stop() doesn’t work completely until the end is reached.
-		positionTween.to([state.xPosition, state.yPosition], 0).end();
+		translateViewCenter(-0.05, 0);
 	},
 	ArrowRight: () => {
-		positionTween.stop();
-		setState({ xPosition: smoothedPosition[0] + 0.005 / Math.pow(2, smoothedZoom[0]) });
-		smoothedPosition[0] = state.xPosition;
-		// HACK(riley): Tween.js has a bug where stop() doesn’t work completely until the end is reached.
-		positionTween.to([state.xPosition, state.yPosition], 0).end();
+		translateViewCenter(0.005, 0);
 	},
 	'Shift+ArrowRight': () => {
-		positionTween.stop();
-		setState({ xPosition: smoothedPosition[0] + 0.05 / Math.pow(2, smoothedZoom[0]) });
-		smoothedPosition[0] = state.xPosition;
-		// HACK(riley): Tween.js has a bug where stop() doesn’t work completely until the end is reached.
-		positionTween.to([state.xPosition, state.yPosition], 0).end();
+		translateViewCenter(0.05, 0);
 	},
-	// Pause / play.
 	Space: () => {
 		setState({ isPlaying: 1 - state.isPlaying });
 		showInfo(state.isPlaying ? 'Playing' : 'Paused');
@@ -226,9 +247,12 @@ tinykeys(window, {
 	'Shift+Space': () => {
 		setState({ animationDirection: state.animationDirection * -1 });
 	},
-	// Show / hide instructions.
 	'Shift+?': () => {
 		instructionsContainer.classList.toggle('show');
+	},
+	Enter: () => {
+		if (!activeRenderer) return;
+		save(activeRenderer, 'fractal-export.png', null, { preventShare: true });
 	},
 	Escape: () => {
 		instructionsContainer.classList.remove('show');
@@ -236,32 +260,235 @@ tinykeys(window, {
 });
 
 const [state, shortKeys, stateParsers] = Object.entries({
-	// Format: [default value, short key, parser]
 	paletteId: [paletteIds[0], 'C'],
 	animationDirection: [1, 'D', parseNumber],
 	exponent: [2, 'E', parseNumber],
 	fractalType: [0, 'F', parseNumber],
+	colorScale: [0.2, 'G', parseNumber],
 	forceHelp: [0, 'H', parseNumber],
 	cImaginary: [-0.43, 'I', parseNumber],
 	isPlaying: [1, 'P', parseNumber],
 	escapeRadius: [2, 'Q', parseNumber],
 	cReal: [-0.71, 'R', parseNumber],
 	speed: [1, 'S', parseNumber],
-	transitionSmoothing: [0, 'T', parseNumber],
+	transitionSmoothing: [1, 'T', parseNumber],
 	spacing: [0.2, 'U', parseNumber],
+	deepCenterReal: ['0', 'A'],
+	deepCenterImag: ['0', 'B'],
+	deepRadius: ['2', 'W'],
 	xPosition: [0, 'X', parseNumber],
 	yPosition: [0, 'Y', parseNumber],
 	zoom: [MIN_ZOOM_EXPONENT, 'Z', parseNumber],
 }).reduce(
-	([state, shortKeys, stateParsers], [key, [value, shortKey, parser]]) => {
-		state[key] = value;
-		shortKeys[key] = shortKey;
-		stateParsers[key] = parser ?? identity;
-		return [state, shortKeys, stateParsers];
+	([nextState, nextShortKeys, nextStateParsers], [key, [value, shortKey, parser]]) => {
+		nextState[key] = value;
+		nextShortKeys[key] = shortKey;
+		nextStateParsers[key] = parser ?? identity;
+		return [nextState, nextShortKeys, nextStateParsers];
 	},
 	[{}, {}, {}],
 );
 const defaultState = { ...state };
+
+function getApproximatePositionFromCenterComponent(centerComponent) {
+	const numericValue = Number(centerComponent);
+	return Number.isFinite(numericValue) ? numericValue / 2 : null;
+}
+
+function incrementDigitString(value) {
+	const digits = value.split('');
+	let carry = 1;
+	for (let i = digits.length - 1; i >= 0 && carry; i--) {
+		const nextDigit = digits[i].charCodeAt(0) - 48 + carry;
+		digits[i] = String(nextDigit % 10);
+		carry = nextDigit >= 10 ? 1 : 0;
+	}
+	if (carry) digits.unshift('1');
+	return digits.join('');
+}
+
+function normalizeDecimalString(sign, integerPart, fractionalPart) {
+	const normalizedInteger = integerPart.replace(/^0+(?=\d)/, '') || '0';
+	const normalizedFraction = fractionalPart.replace(/0+$/, '');
+	if (normalizedInteger === '0' && normalizedFraction === '') return '0';
+	return `${sign}${normalizedInteger}${normalizedFraction ? `.${normalizedFraction}` : ''}`;
+}
+
+function roundPlainDecimalStringToFractionDigits(value, fractionDigits) {
+	const input = String(value).trim();
+	if (input === '' || input.includes('e') || input.includes('E')) return value;
+
+	const sign = input[0] === '-' || input[0] === '+' ? input[0] : '';
+	const unsignedInput = sign ? input.slice(1) : input;
+	const decimalIndex = unsignedInput.indexOf('.');
+	if (decimalIndex === -1) return normalizeDecimalString(sign === '-' ? '-' : '', unsignedInput, '');
+
+	let integerPart = unsignedInput.slice(0, decimalIndex) || '0';
+	const fractionalPart = unsignedInput.slice(decimalIndex + 1);
+	if (fractionalPart.length <= fractionDigits) {
+		return normalizeDecimalString(sign === '-' ? '-' : '', integerPart, fractionalPart);
+	}
+
+	let roundedFraction = fractionalPart.slice(0, fractionDigits);
+	if (fractionalPart.charCodeAt(fractionDigits) >= 53) {
+		if (fractionDigits === 0) {
+			integerPart = incrementDigitString(integerPart);
+		} else {
+			const incrementedFraction = incrementDigitString(roundedFraction);
+			if (incrementedFraction.length > fractionDigits) {
+				integerPart = incrementDigitString(integerPart);
+				roundedFraction = '0'.repeat(fractionDigits);
+			} else {
+				roundedFraction = incrementedFraction.padStart(fractionDigits, '0');
+			}
+		}
+	}
+
+	return normalizeDecimalString(sign === '-' ? '-' : '', integerPart, roundedFraction);
+}
+
+function getUrlCenterFractionDigits(zoom) {
+	if (!Number.isFinite(zoom)) return 17;
+	const radiusDecimalDigits = Math.max(0, Math.ceil((zoom - 1) * Math.log10(2)));
+	return radiusDecimalDigits + URL_CENTER_GUARD_DECIMAL_DIGITS;
+}
+
+function serializeStateValueForHash(key, value, urlCenterFractionDigits) {
+	switch (key) {
+		case 'deepCenterReal':
+		case 'deepCenterImag':
+			return roundPlainDecimalStringToFractionDigits(value, urlCenterFractionDigits);
+		default:
+			return value;
+	}
+}
+
+function syncApproximateCenterFromPreciseState({ syncSmoothed = false } = {}) {
+	const approximateX = getApproximatePositionFromCenterComponent(state.deepCenterReal);
+	const approximateY = getApproximatePositionFromCenterComponent(state.deepCenterImag);
+	if (approximateX !== null) {
+		state.xPosition = approximateX;
+		if (syncSmoothed) smoothedPosition[0] = approximateX;
+	}
+	if (approximateY !== null) {
+		state.yPosition = approximateY;
+		if (syncSmoothed) smoothedPosition[1] = approximateY;
+	}
+}
+
+function syncPreciseCenterFromApproximateState() {
+	state.deepCenterReal = (state.xPosition * 2).toString();
+	state.deepCenterImag = (state.yPosition * 2).toString();
+}
+
+function getRadiusExactForZoom(zoom) {
+	if (!Number.isFinite(zoom)) {
+		return zoom > 0 ? '0' : '2';
+	}
+
+	const log10Radius = (1 - zoom) * Math.log10(2);
+	if (log10Radius > -307 && log10Radius < 307) {
+		const radius = Math.pow(2, 1 - zoom);
+		if (Number.isFinite(radius) && radius > 0) {
+			return radius.toString();
+		}
+	}
+
+	const decimalExponent = Math.floor(log10Radius);
+	const decimalMantissa = Math.pow(10, log10Radius - decimalExponent);
+	return `${decimalMantissa.toPrecision(17)}e${decimalExponent}`;
+}
+
+function getApproximateZoomScale(zoom) {
+	const zoomScale = Math.pow(2, zoom);
+	return Number.isFinite(zoomScale) ? zoomScale : Number.MAX_VALUE;
+}
+
+function getCurrentRadiusExact() {
+	return Math.abs(smoothedZoom[0] - state.zoom) < 1e-9 ? state.deepRadius : getRadiusExactForZoom(smoothedZoom[0]);
+}
+
+function syncPreciseRadiusFromApproximateZoom() {
+	state.deepRadius = getRadiusExactForZoom(state.zoom);
+}
+
+function setApproximateCenterState(xPosition, yPosition, { syncSmoothed = false, persist = true } = {}) {
+	const didChangeCenter =
+		Math.abs(state.xPosition - xPosition) > 1e-15 || Math.abs(state.yPosition - yPosition) > 1e-15;
+	state.xPosition = xPosition;
+	state.yPosition = yPosition;
+	syncPreciseCenterFromApproximateState();
+	if (syncSmoothed) {
+		smoothedPosition[0] = xPosition;
+		smoothedPosition[1] = yPosition;
+	}
+	if (didChangeCenter && isDeepInteractionResolutionActive()) {
+		beginDeepInteractionResolutionReduction();
+	}
+	if (persist) persistStateToHash();
+}
+
+function setPreciseCenterState(centerReal, centerImag, { syncSmoothed = false, persist = true } = {}) {
+	const didChangeCenter = state.deepCenterReal !== centerReal || state.deepCenterImag !== centerImag;
+	state.deepCenterReal = centerReal;
+	state.deepCenterImag = centerImag;
+	syncApproximateCenterFromPreciseState({ syncSmoothed });
+	if (didChangeCenter && isDeepInteractionResolutionActive()) {
+		beginDeepInteractionResolutionReduction();
+	}
+	if (persist) persistStateToHash();
+}
+
+function isPreciseNavigationActive(zoom = state.zoom) {
+	return deepZoomManager.supportsState(state).supported && isDeepZoomRequested(zoom);
+}
+
+function setZoomState(zoom, { syncSmoothed = true, persist = true } = {}) {
+	const didChangeZoom = Math.abs(state.zoom - zoom) > 1e-9;
+	state.zoom = zoom;
+	syncPreciseRadiusFromApproximateZoom();
+	if (syncSmoothed) {
+		smoothedZoom[0] = zoom;
+	}
+	if (didChangeZoom && isDeepInteractionResolutionActive(zoom)) {
+		beginDeepInteractionResolutionReduction();
+	}
+	if (persist) persistStateToHash();
+}
+
+function translatePreciseCenter(deltaReal, deltaImag, radiusExact = state.deepRadius) {
+	if (!deepZoomManager.isInitialized) {
+		initializeDeepZoom();
+		return false;
+	}
+
+	const translatedCenter = deepZoomManager.translateCenter(
+		state.deepCenterReal,
+		state.deepCenterImag,
+		radiusExact,
+		deltaReal,
+		deltaImag,
+	);
+	setPreciseCenterState(translatedCenter.centerReal, translatedCenter.centerImag, { syncSmoothed: true });
+	return true;
+}
+
+function translateViewCenter(deltaReal, deltaImag) {
+	if (translatePreciseCenter(deltaReal, deltaImag, getCurrentRadiusExact())) {
+		positionTween.stop();
+		positionTween.to([state.xPosition, state.yPosition], 0).end();
+		return true;
+	}
+
+	setApproximateCenterState(
+		smoothedPosition[0] + deltaReal / Math.pow(2, smoothedZoom[0]),
+		smoothedPosition[1] + deltaImag / Math.pow(2, smoothedZoom[0]),
+		{ syncSmoothed: true },
+	);
+	positionTween.stop();
+	positionTween.to([state.xPosition, state.yPosition], 0).end();
+	return false;
+}
 
 function resetState() {
 	Object.assign(state, defaultState);
@@ -270,37 +497,73 @@ function resetState() {
 	smoothedZoom[0] = state.zoom;
 	paletteIdx = 0;
 	updateColors(0);
+	deepZoomManager.invalidate('reset');
+	lastDeepIterationRenderSignature = null;
+	lastUploadedDeepOrbitSignature = null;
+	lastObservedZoom = smoothedZoom[0];
+	restoreResolutionAfterDeepInteraction.clearTimeout();
+	setDeepInteractionResolutionReduced(false);
 	updateHash('');
 }
 
 function setState(diff) {
+	let didUpdate = false;
+	let hasApproximateCenterDiff = false;
+	let hasPreciseCenterDiff = false;
+	let hasZoomDiff = false;
+	let hasPreciseRadiusDiff = false;
 	Object.entries(diff).forEach(([key, value]) => {
 		if (!(key in state)) {
 			showError(`Invalid state key: ${key}`);
 			return;
 		}
+		didUpdate = true;
+		if (key === 'xPosition' || key === 'yPosition') hasApproximateCenterDiff = true;
+		if (key === 'deepCenterReal' || key === 'deepCenterImag') hasPreciseCenterDiff = true;
+		if (key === 'zoom') hasZoomDiff = true;
+		if (key === 'deepRadius') hasPreciseRadiusDiff = true;
 		state[key] = value;
 	});
+
+	if (!didUpdate) return;
+	if (hasPreciseCenterDiff) {
+		syncApproximateCenterFromPreciseState();
+	} else if (hasApproximateCenterDiff) {
+		syncPreciseCenterFromApproximateState();
+	}
+	if (hasZoomDiff && !hasPreciseRadiusDiff) {
+		syncPreciseRadiusFromApproximateZoom();
+	}
 	persistStateToHash();
 }
 
-const persistStateToHash = throttle(function persistStateToHash() {
+const persistStateToHash = debounce(function persistStateToHash() {
+	const urlCenterFractionDigits = getUrlCenterFractionDigits(state.zoom);
 	updateHash(
 		Object.entries(state)
-			.map(([key, value]) => `${shortKeys[key]}=${encodeURIComponent(value)}`)
+			.map(
+				([key, value]) =>
+					`${shortKeys[key]}=${encodeURIComponent(serializeStateValueForHash(key, value, urlCenterFractionDigits))}`,
+			)
 			.join('_'),
 	);
 }, 200);
 
 function updateStateFromHash() {
-	const hash = location.hash.substring(1); // Remove the "#".
+	const hash = location.hash.substring(1);
 	try {
+		let hasApproximateCenterState = false;
+		let hasPreciseCenterState = false;
+		let hasPreciseRadiusState = false;
 		const entries = hash
 			.split('_')
 			.map(str => {
 				if (!str) return null;
 
 				const [shortKey, encodedValue] = str.split('=');
+				if (shortKey === 'M' || shortKey === 'J' || shortKey === 'N') {
+					return null;
+				}
 				const key = Object.keys(shortKeys).find(k => shortKeys[k] === shortKey);
 				if (!key) {
 					showError(`Invalid URL short key: ${shortKey}`);
@@ -314,10 +577,19 @@ function updateStateFromHash() {
 		entries.forEach(([key, value]) => {
 			state[key] = value;
 			switch (key) {
+				case 'deepCenterReal':
+				case 'deepCenterImag':
+					hasPreciseCenterState = true;
+					break;
+				case 'deepRadius':
+					hasPreciseRadiusState = true;
+					break;
 				case 'xPosition':
+					hasApproximateCenterState = true;
 					smoothedPosition[0] = value;
 					break;
 				case 'yPosition':
+					hasApproximateCenterState = true;
 					smoothedPosition[1] = value;
 					break;
 				case 'zoom':
@@ -329,25 +601,29 @@ function updateStateFromHash() {
 					break;
 			}
 		});
+		if (hasPreciseCenterState) {
+			syncApproximateCenterFromPreciseState({ syncSmoothed: true });
+		} else if (hasApproximateCenterState) {
+			syncPreciseCenterFromApproximateState();
+		}
+		if (!hasPreciseRadiusState) {
+			syncPreciseRadiusFromApproximateZoom();
+		}
 
 		return entries.length;
 	} catch (e) {
-		// Handle parsing error.
 		console.error('Error parsing the hash', e);
 	}
 }
 
-// Some state doesn’t make sense to share, so it’s left out of the hash state.
-let resolutionMultiplier = 2;
 let showLabels = true;
-let nFramesExported = null;
 let paletteIdx = paletteIds.indexOf(state.paletteId);
 
-// Smoothed state values are kept in arrays so tween.js can work with them.
 const smoothedZoom = [state.zoom];
 const smoothedPosition = [state.xPosition, state.yPosition];
 const positionTween = new Tween(smoothedPosition).easing(Easing.Quadratic.InOut);
 const zoomTween = new Tween(smoothedZoom).easing(Easing.Quadratic.InOut);
+let lastObservedZoom = smoothedZoom[0];
 
 let hideErrorTimeout;
 const errorContainer = document.getElementById('error');
@@ -375,13 +651,18 @@ function showInfo(text) {
 	}, 2000);
 }
 
-const canvas = document.getElementById('canvas');
-const gl = canvas.getContext('webgl2', { antialias: false });
-gl.imageSmoothingEnabled = false;
-
-const fragmentShaderInfo = createProgramInfo(gl, [vertexSource, fragmentSource]);
+const canvas = createFullscreenCanvas(document.getElementById('canvas-container'));
 
 const colors = new Float32Array(N_COLORS * 3);
+function getColorUniformValue() {
+	const uniformValue = [];
+	for (let i = 0; i < N_COLORS; i++) {
+		const offset = i * 3;
+		uniformValue.push([colors[offset], colors[offset + 1], colors[offset + 2]]);
+	}
+	return uniformValue;
+}
+
 function updateColors(direction = 0) {
 	paletteIdx = (paletteIds.length + paletteIdx + direction) % paletteIds.length;
 	const paletteId = paletteIds[paletteIdx];
@@ -392,109 +673,487 @@ function updateColors(direction = 0) {
 	for (let i = 0; i < N_COLORS; ++i) {
 		const rgbComponents = [...normalizedPalette[i % normalizedPalette.length]];
 		if (i >= normalizedPalette.length) {
-			// Add a small random offset to the RGB components for variety.
 			for (let j = 0; j < rgbComponents.length; ++j) {
 				rgbComponents[j] = Math.max(0, Math.min(1, rgbComponents[j] + Math.random() * 0.1 - 0.05));
 			}
 		}
-		const rIdx = i * 3;
-		colors[rIdx] = rgbComponents[0];
-		colors[rIdx + 1] = rgbComponents[1];
-		colors[rIdx + 2] = rgbComponents[2];
+		const offset = i * 3;
+		colors[offset] = rgbComponents[0];
+		colors[offset + 1] = rgbComponents[1];
+		colors[offset + 2] = rgbComponents[2];
 	}
+	colorsVersion += 1;
 	document.documentElement.style.backgroundColor = palette[0];
 }
 
-const arrays = {
-	position: {
-		numComponents: 2,
-		data: [
-			-1.0,
-			-1.0, // Bottom left.
-			1.0,
-			-1.0, // Bottom right.
-			-1.0,
-			1.0, // Top left.
-			1.0,
-			1.0, // Top right.
-		],
-	},
-};
-const bufferInfo = createBufferInfoFromArrays(gl, arrays);
+function getAnimationFrameOffset(time) {
+	return state.isPlaying
+		? (colors.length + ((time * state.animationDirection * state.speed) / 62.5) * state.spacing) % colors.length
+		: 0;
+}
 
-function createScreenTexture(gl, width, height) {
-	return createTexture(gl, {
-		width,
-		height,
-		type: gl.UNSIGNED_BYTE,
-		format: gl.RED_INTEGER,
-		internalFormat: gl.R8UI,
-		minMag: gl.NEAREST,
-		wrap: gl.CLAMP_TO_EDGE,
+function getShaderPadOptions(options = {}) {
+	return {
+		canvas,
+		...options,
+	};
+}
+
+function getCanvasDisplaySize() {
+	const rect = canvas.getBoundingClientRect();
+	return {
+		width: rect.width || canvas.clientWidth || window.innerWidth,
+		height: rect.height || canvas.clientHeight || window.innerHeight,
+	};
+}
+
+function syncCanvasResolution() {
+	const displaySize = getCanvasDisplaySize();
+	const width = Math.max(1, Math.round(displaySize.width * activeResolutionMultiplier));
+	const height = Math.max(1, Math.round(displaySize.height * activeResolutionMultiplier));
+	if (canvas.width === width && canvas.height === height) return;
+
+	canvas.width = width;
+	canvas.height = height;
+}
+
+function setDeepInteractionResolutionReduced(isReduced) {
+	isDeepInteractionResolutionReduced = isReduced;
+	activeResolutionMultiplier = isReduced
+		? Math.min(DEEP_INTERACTION_RESOLUTION_MULTIPLIER, resolutionMultiplier)
+		: resolutionMultiplier;
+	syncCanvasResolution();
+}
+
+const restoreResolutionAfterDeepInteraction = debounce(() => {
+	setDeepInteractionResolutionReduced(false);
+}, DEEP_INTERACTION_RESOLUTION_RESTORE_DEBOUNCE_MS);
+
+function beginDeepInteractionResolutionReduction() {
+	setDeepInteractionResolutionReduced(true);
+	restoreResolutionAfterDeepInteraction();
+}
+
+function isDeepInteractionResolutionActive(zoom = smoothedZoom[0]) {
+	return (
+		deepZoomManager.supportsState(state).supported &&
+		(isDeepZoomRequested(zoom) || isDeepZoomRequested(smoothedZoom[0]))
+	);
+}
+
+function updateDeepInteractionResolutionReduction() {
+	if (Math.abs(smoothedZoom[0] - lastObservedZoom) <= 1e-9) return;
+	lastObservedZoom = smoothedZoom[0];
+	if (isDeepInteractionResolutionActive()) {
+		beginDeepInteractionResolutionReduction();
+	}
+}
+
+function setResolutionMultiplier(nextResolutionMultiplier) {
+	const clampedResolutionMultiplier = Math.max(
+		MIN_RESOLUTION_MULTIPLIER,
+		Math.min(MAX_RESOLUTION_MULTIPLIER, nextResolutionMultiplier),
+	);
+	if (clampedResolutionMultiplier === resolutionMultiplier) return;
+
+	resolutionMultiplier = clampedResolutionMultiplier;
+	activeResolutionMultiplier = isDeepInteractionResolutionReduced
+		? Math.min(DEEP_INTERACTION_RESOLUTION_MULTIPLIER, resolutionMultiplier)
+		: resolutionMultiplier;
+	syncCanvasResolution();
+}
+
+function initializeStandardRendererUniforms(renderState) {
+	standardRenderer.initializeUniform('u_center', 'float', [renderState.xPosition, renderState.yPosition]);
+	standardRenderer.initializeUniform('u_zoom', 'float', renderState.zoomScale);
+	standardRenderer.initializeUniform('u_fractalType', 'int', renderState.fractalType);
+	standardRenderer.initializeUniform('u_exponent', 'int', renderState.exponent);
+	standardRenderer.initializeUniform('u_cReal', 'float', renderState.cReal);
+	standardRenderer.initializeUniform('u_cImaginary', 'float', renderState.cImaginary);
+	standardRenderer.initializeUniform('u_colors', 'float', getColorUniformValue(), { arrayLength: N_COLORS });
+	standardRenderer.initializeUniform('u_transitionSmoothing', 'int', renderState.transitionSmoothing);
+	standardRenderer.initializeUniform('u_escapeRadius', 'float', renderState.escapeRadius);
+	standardRenderer.initializeUniform('u_logEscapeRadius', 'float', renderState.logEscapeRadius);
+	standardRenderer.initializeUniform('u_colorScale', 'float', renderState.colorScale);
+	standardRenderer.initializeUniform('u_paletteFrame', 'float', renderState.paletteFrame);
+	standardRenderer.initializeUniform('u_iterations', 'int', renderState.iterations);
+}
+
+function ensureStandardRenderer(renderState) {
+	if (standardRenderer) return;
+	standardRenderer = new ShaderPad(fragmentSource, getShaderPadOptions());
+	initializeStandardRendererUniforms(renderState);
+	standardRendererColorsVersion = colorsVersion;
+}
+
+function updateStandardRendererUniforms(renderState) {
+	const uniformUpdates = {
+		u_center: [renderState.xPosition, renderState.yPosition],
+		u_zoom: renderState.zoomScale,
+		u_fractalType: renderState.fractalType,
+		u_exponent: renderState.exponent,
+		u_cReal: renderState.cReal,
+		u_cImaginary: renderState.cImaginary,
+		u_transitionSmoothing: renderState.transitionSmoothing,
+		u_escapeRadius: renderState.escapeRadius,
+		u_logEscapeRadius: renderState.logEscapeRadius,
+		u_colorScale: renderState.colorScale,
+		u_paletteFrame: renderState.paletteFrame,
+		u_iterations: renderState.iterations,
+	};
+
+	if (standardRendererColorsVersion !== colorsVersion) {
+		uniformUpdates.u_colors = getColorUniformValue();
+		standardRendererColorsVersion = colorsVersion;
+	}
+
+	standardRenderer.updateUniforms(uniformUpdates);
+}
+
+function decomposeRadiusExact(radiusExact, fallbackRadius) {
+	if (deepZoomManager.isInitialized) {
+		const [mantissa, exponent] = deepZoomManager.decomposeValue(radiusExact);
+		return { mantissa, exponent };
+	}
+
+	if (fallbackRadius === 0) {
+		return { mantissa: 0, exponent: 0 };
+	}
+
+	const exponent = Math.floor(Math.log2(Math.abs(fallbackRadius))) + 1;
+	return {
+		mantissa: fallbackRadius / Math.pow(2, exponent),
+		exponent,
+	};
+}
+
+function getDeepShaderUniforms(renderState) {
+	const referenceUniforms = deepZoomManager.getShaderUniforms();
+	const { mantissa, exponent } = decomposeRadiusExact(renderState.radiusExact, renderState.radius);
+	const referenceOffset = deepZoomManager.getReferenceOffsetFor(renderState);
+	return {
+		u_orbitLength: referenceUniforms?.u_orbitLength ?? 0,
+		u_radiusMantissa: mantissa,
+		u_radiusExponent: exponent,
+		u_referenceOffset: [referenceOffset?.offsetReal ?? 0, referenceOffset?.offsetImag ?? 0],
+	};
+}
+
+function canRenderFromCurrentDeepReference(renderState) {
+	if (!deepZoomManager.hasCompatibleReferenceFor(renderState)) return false;
+	const referenceOffset = deepZoomManager.getReferenceOffsetFor(renderState);
+	if (!referenceOffset) return false;
+	const maxOffset = Math.max(Math.abs(referenceOffset.offsetReal), Math.abs(referenceOffset.offsetImag));
+	return Number.isFinite(maxOffset) && maxOffset <= DEEP_COMPATIBLE_REFERENCE_MAX_OFFSET;
+}
+
+function shouldRecenterDeepReference(renderState) {
+	if (!canRenderFromCurrentDeepReference(renderState)) return true;
+	// hasCompatibleReferenceFor no longer rejects on iteration count (so the deep
+	// renderer keeps drawing during a recompute instead of flashing standard), but
+	// we still need a recompute when the budget outgrows the existing orbit, since
+	// the strict-signature and offset checks below otherwise wouldn't catch it.
+	if (deepZoomManager.referenceIterationsBelow(renderState)) return true;
+	if (deepZoomManager.hasReferenceFor(renderState)) return false;
+	const referenceOffset = deepZoomManager.getReferenceOffsetFor(renderState);
+	if (!referenceOffset) return true;
+	const maxOffset = Math.max(Math.abs(referenceOffset.offsetReal), Math.abs(referenceOffset.offsetImag));
+	return !Number.isFinite(maxOffset) || maxOffset > DEEP_REFERENCE_RECENTER_OFFSET;
+}
+
+function getIterationBudget(zoom) {
+	// One shared budget for both renderers. A discontinuous jump at the deep
+	// threshold (256 → 2048+) would flip every slow-escape pixel from "in-set"
+	// (rendered dark) to "escaped" (rendered with the palette) right at the
+	// boundary, so we ramp continuously from BASE_ITERATIONS up to
+	// DEEP_MIN_ITERATIONS as zoom approaches DEEP_ZOOM_THRESHOLD, then keep
+	// growing with the existing per-zoom-level factor beyond the threshold.
+	const depthFromBase = Math.max(0, zoom - MIN_ZOOM_EXPONENT);
+	const depthFromThreshold = Math.max(0, zoom - DEEP_ZOOM_THRESHOLD);
+	const preThresholdSpan = Math.max(1e-9, DEEP_ZOOM_THRESHOLD - MIN_ZOOM_EXPONENT);
+	const preThresholdRatio = Math.min(1, depthFromBase / preThresholdSpan);
+	const preThresholdBudget = BASE_ITERATIONS + preThresholdRatio * (DEEP_MIN_ITERATIONS - BASE_ITERATIONS);
+	const postThresholdBudget = depthFromThreshold * DEEP_ITERATION_ZOOM_FACTOR;
+	const target = preThresholdBudget + postThresholdBudget;
+	const quantized = Math.ceil(target / DEEP_ITERATION_QUANTUM) * DEEP_ITERATION_QUANTUM;
+	return Math.min(DEEP_MAX_ITERATIONS, Math.max(BASE_ITERATIONS, quantized));
+}
+
+function initializeDeepIterationUniforms(renderState) {
+	const deepUniforms = getDeepShaderUniforms(renderState);
+	deepIterationRenderer.initializeUniform('u_iterations', 'int', renderState.deepIterations);
+	deepIterationRenderer.initializeUniform('u_orbitLength', 'int', deepUniforms.u_orbitLength);
+	deepIterationRenderer.initializeUniform('u_fractalType', 'int', renderState.fractalType);
+	deepIterationRenderer.initializeUniform('u_radiusMantissa', 'float', deepUniforms.u_radiusMantissa);
+	deepIterationRenderer.initializeUniform('u_radiusExponent', 'int', deepUniforms.u_radiusExponent);
+	deepIterationRenderer.initializeUniform('u_referenceOffset', 'float', deepUniforms.u_referenceOffset);
+	deepIterationRenderer.initializeUniform('u_transitionSmoothing', 'int', renderState.transitionSmoothing);
+	deepIterationRenderer.initializeUniform('u_escapeRadius', 'float', renderState.escapeRadius);
+	deepIterationRenderer.initializeUniform('u_logEscapeRadius', 'float', renderState.logEscapeRadius);
+}
+
+function updateDeepIterationUniforms(renderState) {
+	const deepUniforms = getDeepShaderUniforms(renderState);
+	deepIterationRenderer.updateUniforms({
+		u_iterations: renderState.deepIterations,
+		u_orbitLength: deepUniforms.u_orbitLength,
+		u_fractalType: renderState.fractalType,
+		u_radiusMantissa: deepUniforms.u_radiusMantissa,
+		u_radiusExponent: deepUniforms.u_radiusExponent,
+		u_referenceOffset: deepUniforms.u_referenceOffset,
+		u_transitionSmoothing: renderState.transitionSmoothing,
+		u_escapeRadius: renderState.escapeRadius,
+		u_logEscapeRadius: renderState.logEscapeRadius,
 	});
 }
 
-let screenTexture = null;
-function initBuffer() {
-	if (screenTexture) gl.deleteTexture(screenTexture);
-	screenTexture = createScreenTexture(gl, canvas.width, canvas.height);
+function syncDeepOrbitTexture() {
+	if (!deepIterationRenderer) return;
+
+	const orbitTextureSource = deepZoomManager.getOrbitTextureSource();
+	if (!orbitTextureSource) return;
+
+	if (lastUploadedDeepOrbitSignature === deepZoomManager.referenceSignature) return;
+
+	if (lastUploadedDeepOrbitSignature === null) {
+		deepIterationRenderer.initializeTexture('u_orbitTexture', orbitTextureSource, ORBIT_TEXTURE_OPTIONS);
+	} else {
+		deepIterationRenderer.updateTextures({ u_orbitTexture: orbitTextureSource });
+	}
+
+	lastUploadedDeepOrbitSignature = deepZoomManager.referenceSignature;
 }
 
-function resize() {
-	if (resizeCanvasToDisplaySize(gl.canvas, resolutionMultiplier)) {
-		initBuffer(); // Reinitialize texture on resize.
-		gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+function ensureDeepIterationRenderer(renderState) {
+	if (deepIterationRenderer) return;
+
+	deepIterationRenderer = new ShaderPad(generatePerturbationShader(DEEP_MAX_ITERATIONS), {
+		...getShaderPadOptions(),
+		...METRIC_TEXTURE_OPTIONS,
+	});
+	lastDeepIterationRenderSignature = null;
+	initializeDeepIterationUniforms(renderState);
+	syncDeepOrbitTexture();
+}
+
+function initializeDeepDisplayUniforms(renderState) {
+	deepDisplayRenderer.initializeUniform('u_colors', 'float', getColorUniformValue(), { arrayLength: N_COLORS });
+	deepDisplayRenderer.initializeUniform('u_paletteFrame', 'float', renderState.paletteFrame);
+	deepDisplayRenderer.initializeUniform('u_colorScale', 'float', renderState.colorScale);
+	deepDisplayRenderer.initializeTexture('u_liveMetrics', deepIterationRenderer);
+}
+
+function ensureDeepDisplayRenderer(renderState) {
+	if (deepDisplayRenderer) return;
+	ensureDeepIterationRenderer(renderState);
+	deepDisplayRenderer = new ShaderPad(generateDeepDisplayShader(), getShaderPadOptions());
+	initializeDeepDisplayUniforms(renderState);
+	deepDisplayRendererColorsVersion = colorsVersion;
+}
+
+function updateDeepDisplayUniforms(renderState) {
+	const uniformUpdates = {
+		u_paletteFrame: renderState.paletteFrame,
+		u_colorScale: renderState.colorScale,
+	};
+
+	if (deepDisplayRendererColorsVersion !== colorsVersion) {
+		uniformUpdates.u_colors = getColorUniformValue();
+		deepDisplayRendererColorsVersion = colorsVersion;
 	}
+
+	deepDisplayRenderer.updateUniforms(uniformUpdates);
+}
+
+function initializeDeepZoom() {
+	deepZoomManager.initialize().catch(error => {
+		showError('Failed to initialize deep zoom');
+		console.error(error);
+	});
+}
+
+function isDeepZoomRequested(zoom) {
+	return zoom > STANDARD_RENDER_SAFE_ZOOM_EXPONENT || deepZoomManager.shouldUseDeepZoom(zoom);
+}
+
+function getRenderState(time) {
+	const zoomScale = getApproximateZoomScale(smoothedZoom[0]);
+	const centerRealExact = state.deepCenterReal;
+	const centerImagExact = state.deepCenterImag;
+	const radiusExact = getCurrentRadiusExact();
+	const approximateCenterReal = Number(centerRealExact);
+	const approximateCenterImag = Number(centerImagExact);
+	const approximateRadius = Number(radiusExact);
+	const fallbackRadius = Math.pow(2, 1 - smoothedZoom[0]);
+	const iterations = getIterationBudget(smoothedZoom[0]);
+	const renderState = {
+		xPosition: smoothedPosition[0],
+		yPosition: smoothedPosition[1],
+		centerReal: Number.isFinite(approximateCenterReal) ? approximateCenterReal : smoothedPosition[0] * 2,
+		centerImag: Number.isFinite(approximateCenterImag) ? approximateCenterImag : smoothedPosition[1] * 2,
+		centerRealExact,
+		centerImagExact,
+		zoom: smoothedZoom[0],
+		zoomScale,
+		radius: Number.isFinite(approximateRadius) && approximateRadius > 0 ? approximateRadius : fallbackRadius,
+		radiusExact,
+		paletteFrame: getAnimationFrameOffset(time),
+		fractalType: state.fractalType,
+		exponent: state.exponent,
+		cReal: state.cReal,
+		cImaginary: state.cImaginary,
+		iterations,
+		deepIterations: iterations,
+		transitionSmoothing: state.transitionSmoothing,
+		escapeRadius: state.escapeRadius,
+		logEscapeRadius: Math.log(state.escapeRadius),
+		colorScale: Math.max(MIN_COLOR_SCALE, Math.min(MAX_COLOR_SCALE, state.colorScale)),
+		spacing: state.spacing,
+	};
+	return renderState;
+}
+
+function maybeShowUnsupportedDeepZoomNotice(requested, support) {
+	if (!requested || support.supported) {
+		lastUnsupportedDeepZoomReason = null;
+		return;
+	}
+
+	if (lastUnsupportedDeepZoomReason === support.reason) return;
+	lastUnsupportedDeepZoomReason = support.reason;
+	showInfo(support.reason);
+}
+
+function maybeShowDeepZoomModeNotice(requestedDeepZoom, support) {
+	// Track the user's intent (deep zoom requested and supported) rather than the
+	// active renderer mode, which can briefly fall back to standard while a new
+	// reference orbit is being computed and would otherwise re-fire this notice.
+	const isDeepActive = requestedDeepZoom && support.supported;
+	if (lastDeepZoomActive === isDeepActive) return;
+	if (isDeepActive) {
+		showInfo('Deep zoom mode enabled');
+	} else if (lastDeepZoomActive) {
+		showInfo('Standard zoom mode');
+	}
+	lastDeepZoomActive = isDeepActive;
+}
+
+function shouldPrepareDeepZoom(zoom) {
+	return zoom > DEEP_ZOOM_THRESHOLD - DEEP_ZOOM_PREPARATION_MARGIN_EXPONENT;
+}
+
+function getReferenceIterationCount(zoom, currentDeepIterations) {
+	// Compute the orbit with enough iterations to cover both the threshold crossing
+	// and a few zoom units beyond, so the same orbit can be reused without an
+	// immediate recompute as the user keeps zooming in.
+	const headroomZoom = Math.max(zoom, DEEP_ZOOM_THRESHOLD) + DEEP_REFERENCE_ITERATION_HEADROOM_EXPONENT;
+	return Math.max(currentDeepIterations, getIterationBudget(headroomZoom));
+}
+
+function ensureDeepZoomPreparation(renderState, requested, support) {
+	const shouldPrepare = requested || shouldPrepareDeepZoom(renderState.zoom);
+	if (!shouldPrepare) return;
+	if (!deepZoomManager.isInitialized) {
+		initializeDeepZoom();
+		return;
+	}
+	if (!support.supported) return;
+	// Replacing in-flight references during continuous zoom can starve the first deep render.
+	if (deepZoomManager.pendingReferencePromise) return;
+
+	if (!shouldRecenterDeepReference(renderState)) return;
+
+	const referenceIterations = getReferenceIterationCount(renderState.zoom, renderState.deepIterations);
+	const referenceState =
+		referenceIterations === renderState.deepIterations
+			? renderState
+			: { ...renderState, deepIterations: referenceIterations };
+
+	deepZoomManager.ensureReference(referenceState).catch(error => {
+		showError('Failed to compute deep zoom reference');
+		console.error(error);
+	});
+}
+
+function getDeepIterationRenderSignature(renderState) {
+	const referenceOffset = deepZoomManager.getReferenceOffsetFor(renderState);
+	return [
+		deepZoomManager.referenceSignature ?? '',
+		renderState.centerRealExact,
+		renderState.centerImagExact,
+		renderState.radiusExact,
+		referenceOffset?.offsetReal?.toPrecision(12) ?? '0',
+		referenceOffset?.offsetImag?.toPrecision(12) ?? '0',
+		renderState.deepIterations,
+		renderState.transitionSmoothing,
+		renderState.escapeRadius.toPrecision(12),
+		renderState.logEscapeRadius.toPrecision(12),
+		renderState.fractalType,
+		renderState.exponent,
+		renderState.cReal.toPrecision(12),
+		renderState.cImaginary.toPrecision(12),
+		canvas.width,
+		canvas.height,
+	].join('|');
+}
+
+function renderDeepTargetState(targetState) {
+	updateDeepIterationUniforms(targetState);
+	syncDeepOrbitTexture();
+	deepIterationRenderer.step();
+	deepDisplayRenderer.updateTextures({ u_liveMetrics: deepIterationRenderer });
+	lastDeepIterationRenderSignature = getDeepIterationRenderSignature(targetState);
+}
+
+function renderDeepPipeline(renderState) {
+	ensureDeepIterationRenderer(renderState);
+	ensureDeepDisplayRenderer(renderState);
+
+	const targetSignature = getDeepIterationRenderSignature(renderState);
+	if (lastDeepIterationRenderSignature !== targetSignature) {
+		renderDeepTargetState(renderState);
+	}
+
+	updateDeepDisplayUniforms(renderState);
+	deepDisplayRenderer.draw();
 }
 
 function render(time) {
-	positionTween.update(time);
 	zoomTween.update(time);
-	resize();
-	gl.bindFramebuffer(gl.FRAMEBUFFER, null); // Bind the default framebuffer (the screen).
-	gl.useProgram(fragmentShaderInfo.program);
-	setBuffersAndAttributes(gl, fragmentShaderInfo, bufferInfo);
+	updateDeepInteractionResolutionReduction();
+	syncCanvasResolution();
 
-	const frame = state.isPlaying
-		? (colors.length + ((time * state.animationDirection * state.speed) / 62.5) * state.spacing) % colors.length
-		: 0;
-
-	// Pass data to the fragment shader.
-	setUniforms(fragmentShaderInfo, {
-		u_resolution: [gl.canvas.width, gl.canvas.height],
-		u_frame: frame,
-		u_center: smoothedPosition,
-		u_zoom: Math.pow(2, smoothedZoom[0]),
-		u_fractalType: state.fractalType,
-		u_exponent: state.exponent,
-		u_cReal: state.cReal,
-		u_cImaginary: state.cImaginary,
-		u_colors: colors,
-		u_transitionSmoothing: state.transitionSmoothing,
-		u_escapeRadius: state.escapeRadius,
-		u_logEscapeRadius: Math.log(state.escapeRadius),
-		u_spacing: state.spacing,
-	});
-	drawBufferInfo(gl, bufferInfo, gl.TRIANGLE_STRIP);
-
-	if (nFramesExported !== null) {
-		const image = canvas.toDataURL();
-		downloadLink.download = `fractal-export-${nFramesExported.toString().padStart(3, '0')}.png`;
-		downloadLink.href = image;
-		downloadLink.click();
-
-		if (++nFramesExported >= N_COLORS || !state.isPlaying) {
-			nFramesExported = null;
-			showInfo('Exported frames');
-		}
+	if (isPreciseNavigationActive(smoothedZoom[0])) {
+		positionTween.stop();
+		smoothedPosition[0] = state.xPosition;
+		smoothedPosition[1] = state.yPosition;
+	} else {
+		positionTween.update(time);
 	}
 
+	const renderState = getRenderState(time);
+	const requestedDeepZoom = isDeepZoomRequested(renderState.zoom);
+	const deepZoomSupport = deepZoomManager.supportsState(state);
+	ensureDeepZoomPreparation(renderState, requestedDeepZoom, deepZoomSupport);
+	maybeShowUnsupportedDeepZoomNotice(requestedDeepZoom, deepZoomSupport);
+
+	const canRenderDeep =
+		requestedDeepZoom && deepZoomSupport.supported && canRenderFromCurrentDeepReference(renderState);
+
+	if (canRenderDeep) {
+		renderDeepPipeline(renderState);
+		activeRenderer = deepDisplayRenderer;
+	} else {
+		ensureStandardRenderer(renderState);
+		updateStandardRendererUniforms(renderState);
+		standardRenderer.draw();
+		activeRenderer = standardRenderer;
+	}
+
+	maybeShowDeepZoomModeNotice(requestedDeepZoom, deepZoomSupport);
 	requestAnimationFrame(render);
 }
 
-const downloadLink = document.createElement('a');
-
-// Event listeners.
 const instructionsContainer = document.getElementById('instructions');
 instructionsContainer.querySelector('.start-button').addEventListener('click', () => {
 	instructionsContainer.classList.remove('show');
@@ -529,26 +1188,34 @@ canvas.addEventListener('click', e => {
 	const clickX = e.clientX - left;
 	const clickY = e.clientY - top;
 	let normalizedX = (clickX / width) * 2 - 1;
-	let normalizedY = -((clickY / height) * 2 - 1); // Flip y to match WebGL orientation.
+	let normalizedY = -((clickY / height) * 2 - 1);
 	if (aspectRatio > 1.0) {
-		// Landscape.
 		normalizedX *= aspectRatio;
 	} else {
-		// Portrait.
 		normalizedY /= aspectRatio;
+	}
+	if (isPreciseNavigationActive(smoothedZoom[0])) {
+		positionTween.stop();
+		if (!translatePreciseCenter(normalizedX, normalizedY, getCurrentRadiusExact())) {
+			setApproximateCenterState(
+				smoothedPosition[0] + normalizedX / Math.pow(2, smoothedZoom[0]),
+				smoothedPosition[1] + normalizedY / Math.pow(2, smoothedZoom[0]),
+				{ syncSmoothed: true },
+			);
+		}
+		return;
 	}
 	const xPosition = smoothedPosition[0] + normalizedX / Math.pow(2, smoothedZoom[0]);
 	const yPosition = smoothedPosition[1] + normalizedY / Math.pow(2, smoothedZoom[0]);
 	positionTween.stop();
-	setState({ xPosition, yPosition });
+	setApproximateCenterState(xPosition, yPosition);
 	positionTween.to([state.xPosition, state.yPosition], 1000).startFromCurrentValues();
 });
+
 canvas.addEventListener('wheel', e => {
 	const delta = Math.sign(e.deltaY) * 0.05;
 	zoomTween.stop();
-	setState({ zoom: Math.max(MIN_ZOOM_EXPONENT, Math.min(MAX_ZOOM_EXPONENT, smoothedZoom[0] - delta)) });
-	smoothedZoom[0] = state.zoom;
-	// HACK(riley): Tween.js has a bug where stop() doesn’t work completely until the end is reached.
+	setZoomState(Math.max(MIN_ZOOM_EXPONENT, Math.min(MAX_ZOOM_EXPONENT, smoothedZoom[0] - delta)));
 	zoomTween.to([state.zoom], 0).end();
 });
 
@@ -559,11 +1226,7 @@ handleTouch(canvas, (direction, delta, additionalFingers) => {
 			updateColors(Math.sign(delta));
 		} else {
 			zoomTween.stop();
-			setState({
-				zoom: Math.max(MIN_ZOOM_EXPONENT, Math.min(MAX_ZOOM_EXPONENT, smoothedZoom[0] - delta * 0.05)),
-			});
-			smoothedZoom[0] = state.zoom;
-			// HACK(riley): Tween.js has a bug where stop() doesn’t work completely until the end is reached.
+			setZoomState(Math.max(MIN_ZOOM_EXPONENT, Math.min(MAX_ZOOM_EXPONENT, smoothedZoom[0] - delta * 0.05)));
 			zoomTween.to([state.zoom], 0).end();
 		}
 	} else if (additionalFingers === 1) {
@@ -606,8 +1269,9 @@ handleTouch(canvas, (direction, delta, additionalFingers) => {
 	}
 });
 
-// Start it up.
 const nStateUpdates = updateStateFromHash();
+lastObservedZoom = smoothedZoom[0];
+syncCanvasResolution();
 updateColors(0);
 requestAnimationFrame(render);
 
