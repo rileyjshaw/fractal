@@ -13,16 +13,21 @@ uniform float u_cReal;
 uniform float u_cImaginary;
 uniform int u_iterations;
 uniform vec3 u_colors[N_COLORS];
-uniform int u_transitionSmoothing;
 uniform float u_escapeRadius;
 uniform float u_logEscapeRadius;
 uniform float u_colorScale;
 uniform int u_slopeShading;
+uniform vec2 u_slopeLightDir;
+uniform float u_slopeLightHeight;
+uniform float u_slopeLightIntensity;
+uniform int u_stripeAverage;
 
 out vec4 FragColor;
 
-const vec2 SLOPE_LIGHT_DIR = vec2(-0.7071, 0.7071);
-const float SLOPE_LIGHT_HEIGHT = 1.5;
+const float STRIPE_AVERAGE_DENSITY = 8.0;
+// One full palette wrap per unit of stripe variation.
+const float STRIPE_AVERAGE_COLOR_SCALE = float(N_COLORS);
+const float STRIPE_AVERAGE_ESCAPE_RADIUS = 64.0;
 
 vec2 cmul(vec2 a, vec2 b) {
 	return vec2(a.x * b.x - a.y * b.y, a.x * b.y + b.x * a.y);
@@ -43,13 +48,37 @@ bool isFiniteFloat(float value) {
 
 float smoothEscape(int iteration, float mag) {
 	float logMag = log(mag);
-	float logRatio = logMag / max(u_logEscapeRadius, 1e-6);
+	float logEscapeRadius =
+		u_stripeAverage == 1
+			? log(max(u_escapeRadius, STRIPE_AVERAGE_ESCAPE_RADIUS))
+			: u_logEscapeRadius;
+	float logRatio = logMag / max(logEscapeRadius, 1e-6);
 	float nu = log2(logRatio);
-	return float(iteration) + float(u_transitionSmoothing) * (1.0 - nu);
+	return float(iteration) + 1.0 - nu;
 }
 
 float orbitDetailValue(vec2 z) {
 	return 1.0 / (1.0 + dot(z, z));
+}
+
+float stripeAverageAddend(vec2 z) {
+	return 0.5 + 0.5 * sin(STRIPE_AVERAGE_DENSITY * atan(z.y, z.x));
+}
+
+// Continuous stripe average: average the addend across the orbit, then blend against the
+// previous sample's average via the same fractional-iteration factor smoothEscape uses,
+// so the result is continuous across the escape boundary. Returns a palette-index offset.
+float stripePaletteOffset(float stripeTotal, float lastStripeValue, int stripeSamples, float magnitudeSq) {
+	if (u_stripeAverage != 1 || stripeSamples <= 0) return 0.0;
+	float stripeAverageValue = stripeTotal / float(stripeSamples);
+	if (stripeSamples == 1 || !isFiniteFloat(magnitudeSq) || magnitudeSq <= 1.000001) {
+		return stripeAverageValue * STRIPE_AVERAGE_COLOR_SCALE;
+	}
+	float previousAverage = (stripeTotal - lastStripeValue) / float(stripeSamples - 1);
+	float bailout = max(u_escapeRadius, STRIPE_AVERAGE_ESCAPE_RADIUS);
+	float frac = 1.0 + log2(log(bailout * bailout) / max(log(magnitudeSq), 1e-6));
+	float mixedAverage = mix(previousAverage, stripeAverageValue, clamp(frac, 0.0, 1.0));
+	return mixedAverage * STRIPE_AVERAGE_COLOR_SCALE;
 }
 
 float computeSlopeBrightness(vec2 z, vec2 dz) {
@@ -57,9 +86,10 @@ float computeSlopeBrightness(vec2 z, vec2 dz) {
 	float len = length(n);
 	if (!isFiniteFloat(len) || len < 1e-20) return 1.0;
 	n /= len;
-	float diffuse = (dot(n, SLOPE_LIGHT_DIR) + SLOPE_LIGHT_HEIGHT) / (1.0 + SLOPE_LIGHT_HEIGHT);
+	float lightHeight = max(u_slopeLightHeight, 1e-3);
+	float diffuse = (dot(n, normalize(u_slopeLightDir)) + lightHeight) / (1.0 + lightHeight);
 	diffuse = clamp(diffuse, 0.0, 1.0);
-	return 0.45 + 0.85 * diffuse;
+	return max(0.0, mix(1.0, 0.45 + 0.85 * diffuse, u_slopeLightIntensity));
 }
 
 vec2 distanceEstimateMetrics(vec2 z, vec2 dz, float logViewRadius, float pixelRadius) {
@@ -79,18 +109,36 @@ vec2 distanceEstimateMetrics(vec2 z, vec2 dz, float logViewRadius, float pixelRa
 	return vec2(boundarySignal, coverage);
 }
 
-vec4 buildMetric(float smoothIters, float detailTotal, int detailSamples, float coverage, float slopeBrightness) {
+// Metric layout (consumed by getPaletteColor):
+//   .x = smooth iteration count
+//   .y = palette-index offset (stripe contribution, 0 when stripe is off)
+//   .z = brightness multiplier (detail + slope shading)
+//   .w = coverage; stripe mode forces this to 1 so the stripe pattern paints
+//        the M-set interior as well.
+vec4 buildMetric(
+	float smoothIters,
+	float detailTotal,
+	float stripeTotal,
+	float lastStripeValue,
+	int detailSamples,
+	float magnitudeSq,
+	float coverage,
+	float slopeBrightness
+) {
 	float detailAverage = detailSamples > 0 ? detailTotal / float(detailSamples) : 0.5;
 	float detailWeight = coverage < 0.5 ? 1.0 : smoothstep(3.0, 24.0, float(detailSamples));
-	float weightedDetailOffset = (detailAverage - 0.5) * detailWeight;
-	float detailBrightness = mix(1.0, mix(0.82, 1.16, 0.5 + weightedDetailOffset), detailWeight);
-	return vec4(smoothIters, weightedDetailOffset, detailBrightness * slopeBrightness, coverage);
+	float detailBrightness = mix(1.0, mix(0.82, 1.16, detailAverage), detailWeight);
+	float stripeOffset = stripePaletteOffset(stripeTotal, lastStripeValue, detailSamples, magnitudeSq);
+	float finalCoverage = max(coverage, float(u_stripeAverage));
+	return vec4(smoothIters, stripeOffset, detailBrightness * slopeBrightness, finalCoverage);
 }
 
 vec4 buildDistanceMetric(
 	float smoothIters,
 	vec2 z,
 	vec2 dz,
+	float stripeTotal,
+	float lastStripeValue,
 	int detailSamples,
 	float logViewRadius,
 	float pixelRadius
@@ -100,22 +148,40 @@ vec4 buildDistanceMetric(
 	float boundarySignal = deMetrics.x;
 	float coverage = deMetrics.y;
 	float slopeBrightness = u_slopeShading == 1 ? computeSlopeBrightness(z, dz) : 1.0;
-	float signedDetail = 0.5 * boundarySignal * detailWeight;
-	float detailBrightness = mix(1.0, mix(0.82, 1.16, 0.5 + signedDetail), detailWeight);
-	return vec4(smoothIters, signedDetail, detailBrightness * slopeBrightness, coverage);
+	float detailBrightness = mix(1.0, 1.16, boundarySignal * detailWeight);
+	float stripeOffset = stripePaletteOffset(stripeTotal, lastStripeValue, detailSamples, dot(z, z));
+	float finalCoverage = max(coverage, float(u_stripeAverage));
+	return vec4(smoothIters, stripeOffset, detailBrightness * slopeBrightness, finalCoverage);
+}
+
+vec3 srgbToLinear(vec3 color) {
+	color = clamp(color, 0.0, 1.0);
+	vec3 lower = color / 12.92;
+	vec3 higher = pow((color + 0.055) / 1.055, vec3(2.4));
+	return mix(higher, lower, lessThanEqual(color, vec3(0.04045)));
+}
+
+vec3 linearToSrgb(vec3 color) {
+	color = max(color, vec3(0.0));
+	vec3 lower = color * 12.92;
+	vec3 higher = 1.055 * pow(color, vec3(1.0 / 2.4)) - 0.055;
+	return mix(higher, lower, lessThanEqual(color, vec3(0.0031308)));
+}
+
+vec3 mixPaletteLinear(int fromIdx, int toIdx, float t) {
+	return mix(srgbToLinear(u_colors[fromIdx]), srgbToLinear(u_colors[toIdx]), t);
 }
 
 vec3 getPaletteColor(vec4 metric) {
-	float signedDetail = metric.y;
-	float colorIdx = metric.x * u_colorScale + signedDetail * 1.4 + u_paletteFrame;
+	float colorIdx = metric.x * u_colorScale + metric.y + u_paletteFrame;
 	float wrappedIdx = mod(floor(colorIdx), float(N_COLORS));
 	float t = fract(colorIdx);
 	int fromIdx = int(wrappedIdx);
 	int toIdx = (fromIdx + 1) % N_COLORS;
 
-	vec3 outsideColor = mix(u_colors[fromIdx], u_colors[toIdx], t) * metric.z;
-	vec3 insideColor = mix(u_colors[0], u_colors[1], 0.5 + signedDetail) * 0.18;
-	return clamp(mix(insideColor, outsideColor, metric.w), 0.0, 1.0);
+	vec3 outsideColor = mixPaletteLinear(fromIdx, toIdx, t) * metric.z;
+	vec3 insideColor = mixPaletteLinear(0, 1, 0.5) * 0.18;
+	return linearToSrgb(clamp(mix(insideColor, outsideColor, metric.w), 0.0, 1.0));
 }
 
 bool inMandelbrotInterior(vec2 c) {
@@ -133,8 +199,11 @@ vec4 iterateJulia(vec2 coord, vec2 c, float pixelRadius) {
 	vec2 z = coord;
 	vec2 dz = vec2(1.0, 0.0);
 	float detailTotal = 0.0;
+	float stripeTotal = 0.0;
+	float lastStripeValue = 0.5;
 	int detailSamples = 0;
 	float logViewRadius = log(2.0) - log(max(u_zoom, 1e-30));
+	float escapeRadius = u_stripeAverage == 1 ? max(u_escapeRadius, STRIPE_AVERAGE_ESCAPE_RADIUS) : u_escapeRadius;
 	for (int i = 0; i < u_iterations; i++) {
 		vec2 previousZ = z;
 		if (u_exponent == 2) {
@@ -145,26 +214,51 @@ vec4 iterateJulia(vec2 coord, vec2 c, float pixelRadius) {
 		}
 		float mag = length(z);
 		detailTotal += orbitDetailValue(z);
+		lastStripeValue = stripeAverageAddend(z);
+		stripeTotal += lastStripeValue;
 		detailSamples += 1;
-		if (mag > u_escapeRadius) {
+		if (mag > escapeRadius) {
 			if (u_exponent == 2) {
-				return buildDistanceMetric(smoothEscape(i, mag), z, dz, detailSamples, logViewRadius, pixelRadius);
+				return buildDistanceMetric(
+					smoothEscape(i, mag),
+					z,
+					dz,
+					stripeTotal,
+					lastStripeValue,
+					detailSamples,
+					logViewRadius,
+					pixelRadius
+				);
 			}
-			return buildMetric(smoothEscape(i, mag), detailTotal, detailSamples, 1.0, 1.0);
+			return buildMetric(
+				smoothEscape(i, mag),
+				detailTotal,
+				stripeTotal,
+				lastStripeValue,
+				detailSamples,
+				mag * mag,
+				1.0,
+				1.0
+			);
 		}
 	}
-	return buildMetric(float(u_iterations), detailTotal, detailSamples, 0.0, 1.0);
+	return buildMetric(float(u_iterations), detailTotal, stripeTotal, lastStripeValue, detailSamples, 0.0, 0.0, 1.0);
 }
 
 vec4 iterateMandelbrot(vec2 coord, float pixelRadius) {
-	if (u_exponent == 2 && inMandelbrotInterior(coord)) {
-		return buildMetric(float(u_iterations), 0.0, 0, 0.0, 1.0);
+	// Skip the cardioid/period-2 bulb early-out when stripe averaging is on; the orbit
+	// is needed to compute the addend.
+	if (u_exponent == 2 && u_stripeAverage != 1 && inMandelbrotInterior(coord)) {
+		return buildMetric(float(u_iterations), 0.0, 0.0, 0.5, 0, 0.0, 0.0, 1.0);
 	}
 	vec2 z = vec2(0.0);
 	vec2 dz = vec2(0.0);
 	float detailTotal = 0.0;
+	float stripeTotal = 0.0;
+	float lastStripeValue = 0.5;
 	int detailSamples = 0;
 	float logViewRadius = log(2.0) - log(max(u_zoom, 1e-30));
+	float escapeRadius = u_stripeAverage == 1 ? max(u_escapeRadius, STRIPE_AVERAGE_ESCAPE_RADIUS) : u_escapeRadius;
 	for (int i = 0; i < u_iterations; i++) {
 		vec2 previousZ = z;
 		if (u_exponent == 2) {
@@ -175,48 +269,96 @@ vec4 iterateMandelbrot(vec2 coord, float pixelRadius) {
 		}
 		float mag = length(z);
 		detailTotal += orbitDetailValue(z);
+		lastStripeValue = stripeAverageAddend(z);
+		stripeTotal += lastStripeValue;
 		detailSamples += 1;
-		if (mag > u_escapeRadius) {
+		if (mag > escapeRadius) {
 			if (u_exponent == 2) {
-				return buildDistanceMetric(smoothEscape(i, mag), z, dz, detailSamples, logViewRadius, pixelRadius);
+				return buildDistanceMetric(
+					smoothEscape(i, mag),
+					z,
+					dz,
+					stripeTotal,
+					lastStripeValue,
+					detailSamples,
+					logViewRadius,
+					pixelRadius
+				);
 			}
-			return buildMetric(smoothEscape(i, mag), detailTotal, detailSamples, 1.0, 1.0);
+			return buildMetric(
+				smoothEscape(i, mag),
+				detailTotal,
+				stripeTotal,
+				lastStripeValue,
+				detailSamples,
+				mag * mag,
+				1.0,
+				1.0
+			);
 		}
 	}
-	return buildMetric(float(u_iterations), detailTotal, detailSamples, 0.0, 1.0);
+	return buildMetric(float(u_iterations), detailTotal, stripeTotal, lastStripeValue, detailSamples, 0.0, 0.0, 1.0);
 }
 
 vec4 iterateBurningShip(vec2 coord) {
 	coord = vec2(1.0, -1.0) * coord;
 	vec2 z = vec2(0.0);
 	float detailTotal = 0.0;
+	float stripeTotal = 0.0;
+	float lastStripeValue = 0.5;
 	int detailSamples = 0;
+	float escapeRadius = u_stripeAverage == 1 ? max(u_escapeRadius, STRIPE_AVERAGE_ESCAPE_RADIUS) : u_escapeRadius;
 	for (int i = 0; i < u_iterations; i++) {
 		z = cpow(abs(z), u_exponent) + coord;
 		float mag = length(z);
 		detailTotal += orbitDetailValue(z);
+		lastStripeValue = stripeAverageAddend(z);
+		stripeTotal += lastStripeValue;
 		detailSamples += 1;
-		if (mag > u_escapeRadius) {
-			return buildMetric(smoothEscape(i, mag), detailTotal, detailSamples, 1.0, 1.0);
+		if (mag > escapeRadius) {
+			return buildMetric(
+				smoothEscape(i, mag),
+				detailTotal,
+				stripeTotal,
+				lastStripeValue,
+				detailSamples,
+				mag * mag,
+				1.0,
+				1.0
+			);
 		}
 	}
-	return buildMetric(float(u_iterations), detailTotal, detailSamples, 0.0, 1.0);
+	return buildMetric(float(u_iterations), detailTotal, stripeTotal, lastStripeValue, detailSamples, 0.0, 0.0, 1.0);
 }
 
 vec4 iterateMandala(vec2 coord, vec2 c) {
 	vec2 z = coord;
 	float detailTotal = 0.0;
+	float stripeTotal = 0.0;
+	float lastStripeValue = 0.5;
 	int detailSamples = 0;
+	float escapeRadius = u_stripeAverage == 1 ? max(u_escapeRadius, STRIPE_AVERAGE_ESCAPE_RADIUS) : u_escapeRadius;
 	for (int i = 0; i < u_iterations; i++) {
 		z = cpow(abs(z), u_exponent) + c;
 		float mag = length(z);
 		detailTotal += orbitDetailValue(z);
+		lastStripeValue = stripeAverageAddend(z);
+		stripeTotal += lastStripeValue;
 		detailSamples += 1;
-		if (mag > u_escapeRadius) {
-			return buildMetric(smoothEscape(i, mag), detailTotal, detailSamples, 1.0, 1.0);
+		if (mag > escapeRadius) {
+			return buildMetric(
+				smoothEscape(i, mag),
+				detailTotal,
+				stripeTotal,
+				lastStripeValue,
+				detailSamples,
+				mag * mag,
+				1.0,
+				1.0
+			);
 		}
 	}
-	return buildMetric(float(u_iterations), detailTotal, detailSamples, 0.0, 1.0);
+	return buildMetric(float(u_iterations), detailTotal, stripeTotal, lastStripeValue, detailSamples, 0.0, 0.0, 1.0);
 }
 
 void main() {

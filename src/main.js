@@ -30,12 +30,17 @@ const MIN_RESOLUTION_MULTIPLIER = 0.0625;
 const MAX_RESOLUTION_MULTIPLIER = 2;
 const MIN_ESCAPE_RADIUS = 0.8;
 const MAX_ESCAPE_RADIUS = 2;
-const MIN_SPACING = 0.1;
-const MAX_SPACING = 2.0;
 const MIN_COLOR_SCALE = 0.02;
 const MAX_COLOR_SCALE = 1.0;
+const MIN_SLOPE_LIGHT_HEIGHT = 0.1;
+const MAX_SLOPE_LIGHT_HEIGHT = 4;
+const MIN_SLOPE_LIGHT_INTENSITY = 0;
+const MAX_SLOPE_LIGHT_INTENSITY = 2;
+const SLOPE_LIGHT_ANGLE_STEP = 5;
+const SLOPE_LIGHT_HEIGHT_STEP = 0.1;
+const SLOPE_LIGHT_INTENSITY_STEP = 0.05;
 const MIN_SPEED = 0.1;
-const MAX_SPEED = 4;
+const MAX_SPEED = 8;
 const BASE_ITERATIONS = 256;
 const DEEP_MIN_ITERATIONS = 2048;
 const DEEP_MAX_ITERATIONS = 65536;
@@ -164,11 +169,23 @@ tinykeys(window, {
 		setState({ cImaginary: Math.max(-MAX_CONSTANT_COMPONENT, state.cImaginary - 0.01) });
 		showInfo(`C (imaginary): ${state.cImaginary.toFixed(2)}`);
 	},
+	KeyJ: () => {
+		updateSlopeLightIntensity(SLOPE_LIGHT_INTENSITY_STEP);
+	},
+	'Shift+KeyJ': () => {
+		updateSlopeLightIntensity(-SLOPE_LIGHT_INTENSITY_STEP);
+	},
+	KeyK: () => {
+		updateSlopeLightHeight(SLOPE_LIGHT_HEIGHT_STEP);
+	},
+	'Shift+KeyK': () => {
+		updateSlopeLightHeight(-SLOPE_LIGHT_HEIGHT_STEP);
+	},
 	KeyL: () => {
-		showLabels = !showLabels;
-		if (showLabels) {
-			showInfo('Labels on');
-		}
+		updateSlopeLightAngle(SLOPE_LIGHT_ANGLE_STEP);
+	},
+	'Shift+KeyL': () => {
+		updateSlopeLightAngle(-SLOPE_LIGHT_ANGLE_STEP);
 	},
 	KeyN: () => {
 		setState({ slopeShading: 1 - state.slopeShading });
@@ -209,17 +226,9 @@ tinykeys(window, {
 		setState({ speed: Math.max(MIN_SPEED, state.speed - 0.1) });
 		showInfo(`Speed: ${state.speed.toFixed(1)}`);
 	},
-	KeyT: () => {
-		setState({ transitionSmoothing: 1 - state.transitionSmoothing });
-		showInfo(`Transition smoothing: ${state.transitionSmoothing ? 'on' : 'off'}`);
-	},
-	KeyU: () => {
-		setState({ spacing: Math.min(MAX_SPACING, state.spacing + 0.01) });
-		showInfo(`Spacing: ${state.spacing.toFixed(2)}`);
-	},
-	'Shift+KeyU': () => {
-		setState({ spacing: Math.max(MIN_SPACING, state.spacing - 0.01) });
-		showInfo(`Spacing: ${state.spacing.toFixed(2)}`);
+	KeyA: () => {
+		setState({ stripeAverage: 1 - state.stripeAverage });
+		showInfo(state.stripeAverage ? 'Stripe average coloring on' : 'Stripe average coloring off');
 	},
 	KeyZ: () => {
 		zoomTween.stop();
@@ -276,7 +285,7 @@ tinykeys(window, {
 	},
 	Enter: () => {
 		if (!activeRenderer) return;
-		save(activeRenderer, 'fractal-export.png', null, { preventShare: true });
+		save(activeRenderer, 'fractal.png', null, { preventShare: true });
 	},
 	Escape: () => {
 		instructionsContainer.classList.remove('show');
@@ -292,12 +301,14 @@ const [state, shortKeys, stateParsers] = Object.entries({
 	forceHelp: [0, 'H', parseNumber],
 	cImaginary: [-0.43, 'I', parseNumber],
 	slopeShading: [1, 'K', parseNumber],
+	slopeLightAngle: [135, 'LA', parseNumber],
+	slopeLightHeight: [1.5, 'LH', parseNumber],
+	slopeLightIntensity: [1, 'LI', parseNumber],
+	stripeAverage: [0, 'SA', parseNumber],
 	isPlaying: [1, 'P', parseNumber],
 	escapeRadius: [2, 'Q', parseNumber],
 	cReal: [-0.71, 'R', parseNumber],
 	speed: [1, 'S', parseNumber],
-	transitionSmoothing: [1, 'T', parseNumber],
-	spacing: [0.2, 'U', parseNumber],
 	deepCenterReal: ['0', 'A'],
 	deepCenterImag: ['0', 'B'],
 	deepRadius: ['2', 'W'],
@@ -586,14 +597,9 @@ function updateStateFromHash() {
 				if (!str) return null;
 
 				const [shortKey, encodedValue] = str.split('=');
-				if (shortKey === 'M' || shortKey === 'J' || shortKey === 'N') {
-					return null;
-				}
-				const key = Object.keys(shortKeys).find(k => shortKeys[k] === shortKey);
-				if (!key) {
-					showError(`Invalid URL short key: ${shortKey}`);
-					return null;
-				}
+				const key =
+					shortKey === 'V' ? 'stripeAverage' : Object.keys(shortKeys).find(k => shortKeys[k] === shortKey);
+				if (!key) return null;
 				const parser = stateParsers[key];
 				const value = parser(decodeURIComponent(encodedValue));
 				return [key, value];
@@ -716,10 +722,22 @@ function updateColors(direction = 0) {
 	document.documentElement.style.backgroundColor = palette[0];
 }
 
+// At effective speed = 1 the palette advances by one band roughly every 312ms (a full
+// 32-color cycle takes ~10s). Tuned to feel like a slow, ambient drift at the default.
+const ANIMATION_MS_PER_PALETTE_BAND = 312.5;
+// The user-facing speed value is linear in [MIN_SPEED, MAX_SPEED] with default 1, but it
+// gets squared before driving the animation. That keeps the UI value intuitive while
+// giving a much wider effective range (0..64 with the current bounds) and finer control
+// near the default — a 0.1 nudge at speed 1 changes the rate by ~20%, while the same
+// nudge at speed 6 changes it by ~3%. Direction stays on animationDirection so the
+// squared mapping doesn't have to preserve sign.
 function getAnimationFrameOffset(time) {
-	return state.isPlaying
-		? (colors.length + ((time * state.animationDirection * state.speed) / 62.5) * state.spacing) % colors.length
-		: 0;
+	if (!state.isPlaying) return 0;
+	const effectiveSpeed = state.speed * state.speed;
+	return (
+		(colors.length + (time * state.animationDirection * effectiveSpeed) / ANIMATION_MS_PER_PALETTE_BAND) %
+		colors.length
+	);
 }
 
 function getShaderPadOptions(options = {}) {
@@ -808,6 +826,35 @@ function setResolutionMultiplier(nextResolutionMultiplier) {
 	syncCanvasResolution();
 }
 
+function getSlopeLightDirection(angleDegrees) {
+	const angleRadians = (angleDegrees * Math.PI) / 180;
+	return [Math.cos(angleRadians), Math.sin(angleRadians)];
+}
+
+function updateSlopeLightAngle(delta) {
+	const slopeLightAngle = (state.slopeLightAngle + delta + 360) % 360;
+	setState({ slopeLightAngle });
+	showInfo(`Light direction: ${Math.round(slopeLightAngle)}deg`);
+}
+
+function updateSlopeLightHeight(delta) {
+	const slopeLightHeight = Math.max(
+		MIN_SLOPE_LIGHT_HEIGHT,
+		Math.min(MAX_SLOPE_LIGHT_HEIGHT, state.slopeLightHeight + delta),
+	);
+	setState({ slopeLightHeight });
+	showInfo(`Light height: ${slopeLightHeight.toFixed(1)}`);
+}
+
+function updateSlopeLightIntensity(delta) {
+	const slopeLightIntensity = Math.max(
+		MIN_SLOPE_LIGHT_INTENSITY,
+		Math.min(MAX_SLOPE_LIGHT_INTENSITY, state.slopeLightIntensity + delta),
+	);
+	setState({ slopeLightIntensity });
+	showInfo(`Light intensity: ${slopeLightIntensity.toFixed(2)}`);
+}
+
 function initializeStandardRendererUniforms(renderState) {
 	standardRenderer.initializeUniform('u_center', 'float', [renderState.xPosition, renderState.yPosition]);
 	standardRenderer.initializeUniform('u_zoom', 'float', renderState.zoomScale);
@@ -816,13 +863,16 @@ function initializeStandardRendererUniforms(renderState) {
 	standardRenderer.initializeUniform('u_cReal', 'float', renderState.cReal);
 	standardRenderer.initializeUniform('u_cImaginary', 'float', renderState.cImaginary);
 	standardRenderer.initializeUniform('u_colors', 'float', getColorUniformValue(), { arrayLength: N_COLORS });
-	standardRenderer.initializeUniform('u_transitionSmoothing', 'int', renderState.transitionSmoothing);
 	standardRenderer.initializeUniform('u_escapeRadius', 'float', renderState.escapeRadius);
 	standardRenderer.initializeUniform('u_logEscapeRadius', 'float', renderState.logEscapeRadius);
 	standardRenderer.initializeUniform('u_colorScale', 'float', renderState.colorScale);
 	standardRenderer.initializeUniform('u_paletteFrame', 'float', renderState.paletteFrame);
 	standardRenderer.initializeUniform('u_iterations', 'int', renderState.iterations);
 	standardRenderer.initializeUniform('u_slopeShading', 'int', renderState.slopeShading);
+	standardRenderer.initializeUniform('u_slopeLightDir', 'float', renderState.slopeLightDir);
+	standardRenderer.initializeUniform('u_slopeLightHeight', 'float', renderState.slopeLightHeight);
+	standardRenderer.initializeUniform('u_slopeLightIntensity', 'float', renderState.slopeLightIntensity);
+	standardRenderer.initializeUniform('u_stripeAverage', 'int', renderState.stripeAverage);
 }
 
 function ensureStandardRenderer(renderState) {
@@ -840,13 +890,16 @@ function updateStandardRendererUniforms(renderState) {
 		u_exponent: renderState.exponent,
 		u_cReal: renderState.cReal,
 		u_cImaginary: renderState.cImaginary,
-		u_transitionSmoothing: renderState.transitionSmoothing,
 		u_escapeRadius: renderState.escapeRadius,
 		u_logEscapeRadius: renderState.logEscapeRadius,
 		u_colorScale: renderState.colorScale,
 		u_paletteFrame: renderState.paletteFrame,
 		u_iterations: renderState.iterations,
 		u_slopeShading: renderState.slopeShading,
+		u_slopeLightDir: renderState.slopeLightDir,
+		u_slopeLightHeight: renderState.slopeLightHeight,
+		u_slopeLightIntensity: renderState.slopeLightIntensity,
+		u_stripeAverage: renderState.stripeAverage,
 	};
 
 	if (standardRendererColorsVersion !== colorsVersion) {
@@ -890,6 +943,7 @@ function getDeepShaderUniforms(renderState) {
 		u_poly2: referenceUniforms?.u_poly2 ?? [0, 0],
 		u_polynomialLimit: referenceUniforms?.u_polynomialLimit ?? 0,
 		u_polyScaleExponent: referenceUniforms?.u_polyScaleExponent ?? 0,
+		u_stripeAveragePresum: referenceUniforms?.u_stripeAveragePresum ?? 0,
 	};
 }
 
@@ -941,15 +995,19 @@ function initializeDeepIterationUniforms(renderState) {
 	deepIterationRenderer.initializeUniform('u_radiusMantissa', 'float', deepUniforms.u_radiusMantissa);
 	deepIterationRenderer.initializeUniform('u_radiusExponent', 'int', deepUniforms.u_radiusExponent);
 	deepIterationRenderer.initializeUniform('u_referenceOffset', 'float', deepUniforms.u_referenceOffset);
-	deepIterationRenderer.initializeUniform('u_transitionSmoothing', 'int', renderState.transitionSmoothing);
 	deepIterationRenderer.initializeUniform('u_escapeRadius', 'float', renderState.escapeRadius);
 	deepIterationRenderer.initializeUniform('u_logEscapeRadius', 'float', renderState.logEscapeRadius);
 	deepIterationRenderer.initializeUniform('u_slopeShading', 'int', renderState.slopeShading);
+	deepIterationRenderer.initializeUniform('u_slopeLightDir', 'float', renderState.slopeLightDir);
+	deepIterationRenderer.initializeUniform('u_slopeLightHeight', 'float', renderState.slopeLightHeight);
+	deepIterationRenderer.initializeUniform('u_slopeLightIntensity', 'float', renderState.slopeLightIntensity);
+	deepIterationRenderer.initializeUniform('u_stripeAverage', 'int', renderState.stripeAverage);
 	deepIterationRenderer.initializeUniform('u_seriesApproximation', 'int', renderState.seriesApproximation);
 	deepIterationRenderer.initializeUniform('u_poly1', 'float', deepUniforms.u_poly1);
 	deepIterationRenderer.initializeUniform('u_poly2', 'float', deepUniforms.u_poly2);
 	deepIterationRenderer.initializeUniform('u_polynomialLimit', 'int', deepUniforms.u_polynomialLimit);
 	deepIterationRenderer.initializeUniform('u_polyScaleExponent', 'int', deepUniforms.u_polyScaleExponent);
+	deepIterationRenderer.initializeUniform('u_stripeAveragePresum', 'float', deepUniforms.u_stripeAveragePresum);
 }
 
 function updateDeepIterationUniforms(renderState) {
@@ -965,15 +1023,19 @@ function updateDeepIterationUniforms(renderState) {
 		u_radiusMantissa: deepUniforms.u_radiusMantissa,
 		u_radiusExponent: deepUniforms.u_radiusExponent,
 		u_referenceOffset: deepUniforms.u_referenceOffset,
-		u_transitionSmoothing: renderState.transitionSmoothing,
 		u_escapeRadius: renderState.escapeRadius,
 		u_logEscapeRadius: renderState.logEscapeRadius,
 		u_slopeShading: renderState.slopeShading,
+		u_slopeLightDir: renderState.slopeLightDir,
+		u_slopeLightHeight: renderState.slopeLightHeight,
+		u_slopeLightIntensity: renderState.slopeLightIntensity,
+		u_stripeAverage: renderState.stripeAverage,
 		u_seriesApproximation: renderState.seriesApproximation,
 		u_poly1: deepUniforms.u_poly1,
 		u_poly2: deepUniforms.u_poly2,
 		u_polynomialLimit: deepUniforms.u_polynomialLimit,
 		u_polyScaleExponent: deepUniforms.u_polyScaleExponent,
+		u_stripeAveragePresum: deepUniforms.u_stripeAveragePresum,
 	});
 }
 
@@ -1056,6 +1118,14 @@ function getRenderState(time) {
 	const approximateRadius = Number(radiusExact);
 	const fallbackRadius = Math.pow(2, 1 - smoothedZoom[0]);
 	const fullIterations = getIterationBudget(smoothedZoom[0]);
+	const slopeLightAngle = Number.isFinite(state.slopeLightAngle)
+		? state.slopeLightAngle
+		: defaultState.slopeLightAngle;
+	const slopeLightHeight = Math.max(MIN_SLOPE_LIGHT_HEIGHT, Math.min(MAX_SLOPE_LIGHT_HEIGHT, state.slopeLightHeight));
+	const slopeLightIntensity = Math.max(
+		MIN_SLOPE_LIGHT_INTENSITY,
+		Math.min(MAX_SLOPE_LIGHT_INTENSITY, state.slopeLightIntensity),
+	);
 	// Iterations are not capped during interaction; instead the canvas is resized
 	// down (see getDeepInteractionMotionResolutionFactor / syncCanvasResolution)
 	// so the iteration shader does less per-frame work but stays correct.
@@ -1079,12 +1149,14 @@ function getRenderState(time) {
 		iterations,
 		deepIterations: iterations,
 		fullIterations,
-		transitionSmoothing: state.transitionSmoothing,
 		escapeRadius: state.escapeRadius,
 		logEscapeRadius: Math.log(state.escapeRadius),
 		colorScale: Math.max(MIN_COLOR_SCALE, Math.min(MAX_COLOR_SCALE, state.colorScale)),
-		spacing: state.spacing,
 		slopeShading: state.slopeShading,
+		slopeLightDir: getSlopeLightDirection(slopeLightAngle),
+		slopeLightHeight,
+		slopeLightIntensity,
+		stripeAverage: state.stripeAverage,
 		seriesApproximation: 1,
 	};
 	return renderState;
@@ -1163,7 +1235,6 @@ function getDeepIterationRenderSignature(renderState) {
 		referenceOffset?.offsetReal?.toPrecision(12) ?? '0',
 		referenceOffset?.offsetImag?.toPrecision(12) ?? '0',
 		renderState.deepIterations,
-		renderState.transitionSmoothing,
 		renderState.escapeRadius.toPrecision(12),
 		renderState.logEscapeRadius.toPrecision(12),
 		renderState.fractalType,
@@ -1171,6 +1242,10 @@ function getDeepIterationRenderSignature(renderState) {
 		renderState.cReal.toPrecision(12),
 		renderState.cImaginary.toPrecision(12),
 		renderState.slopeShading,
+		renderState.slopeLightDir.map(value => value.toPrecision(12)).join(','),
+		renderState.slopeLightHeight.toPrecision(12),
+		renderState.slopeLightIntensity.toPrecision(12),
+		renderState.stripeAverage,
 		renderState.seriesApproximation,
 		canvas.width,
 		canvas.height,

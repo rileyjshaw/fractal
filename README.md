@@ -44,11 +44,10 @@ Burning Ship, Mandala, and non-quadratic exponents stay on the standard renderer
 - `F` / `Shift+F`: change fractal type
 - `G` / `Shift+G`: change color density
 - `I` / `Shift+I`: change Julia imaginary component
+- `A`: toggle stripe average coloring
 - `Q` / `Shift+Q`: change escape radius
 - `R` / `Shift+R`: change Julia real component
 - `S` / `Shift+S`: change animation speed
-- `T`: toggle transition smoothing, on by default
-- `U` / `Shift+U`: change palette animation spacing
 - `X`: reset state
 - `Z` / `Shift+Z`: zoom in / out
 - Arrow keys: pan

@@ -8,6 +8,11 @@ precision highp float;
 #define MIN_SERIES_APPROXIMATION_ITERATIONS 16
 #define SERIES_APPROXIMATION_SAFETY_RATIO 0.001
 #define BAILOUT_PERTURBATION_DELTA_SQ 1.0e6
+// |dz| grows as ~prod(2*|Z|) and overflows float32 in deep zoom, so we carry it as a
+// (mantissa, log-offset) pair: log|dz| = log(length(mantissa)) + logOffset.
+#define DERIVATIVE_RESCALE_TRIGGER_SQ 1.0e30
+#define DERIVATIVE_RESCALE_FACTOR 1.0e-15
+#define DERIVATIVE_RESCALE_LOG 34.538776394910684
 
 uniform sampler2D u_orbitTexture;
 uniform vec2 u_resolution;
@@ -17,20 +22,26 @@ uniform int u_fractalType;
 uniform float u_radiusMantissa;
 uniform int u_radiusExponent;
 uniform vec2 u_referenceOffset;
-uniform int u_transitionSmoothing;
 uniform float u_escapeRadius;
 uniform float u_logEscapeRadius;
 uniform vec4 u_poly1;
 uniform vec2 u_poly2;
 uniform int u_polynomialLimit;
 uniform int u_polyScaleExponent;
+uniform float u_stripeAveragePresum;
 uniform int u_seriesApproximation;
 uniform int u_slopeShading;
+uniform vec2 u_slopeLightDir;
+uniform float u_slopeLightHeight;
+uniform float u_slopeLightIntensity;
+uniform int u_stripeAverage;
 
 out vec4 FragColor;
 
-const vec2 SLOPE_LIGHT_DIR = vec2(-0.7071, 0.7071);
-const float SLOPE_LIGHT_HEIGHT = 1.5;
+const float STRIPE_AVERAGE_DENSITY = 8.0;
+// One palette wrap per unit of stripe variation; see fractal.frag for rationale.
+const float STRIPE_AVERAGE_COLOR_SCALE = 32.0;
+const float STRIPE_AVERAGE_ESCAPE_RADIUS = 64.0;
 
 float safeExp2(float exponent) {
 	return exp2(clamp(exponent, -126.0, 126.0));
@@ -53,13 +64,32 @@ vec3 getOrbit(int i) {
 
 float smoothEscape(int iteration, float magnitude) {
 	float logMag = log(magnitude);
-	float logRatio = logMag / max(u_logEscapeRadius, 1e-6);
+	float logEscapeRadius = u_stripeAverage == 1 ? log(max(u_escapeRadius, STRIPE_AVERAGE_ESCAPE_RADIUS)) : u_logEscapeRadius;
+	float logRatio = logMag / max(logEscapeRadius, 1e-6);
 	float nu = log2(logRatio);
-	return float(iteration) + float(u_transitionSmoothing) * (1.0 - nu);
+	return float(iteration) + 1.0 - nu;
 }
 
 float orbitDetailValue(vec2 z) {
 	return 1.0 / (1.0 + dot(z, z));
+}
+
+float stripeAverageAddend(vec2 z) {
+	return 0.5 + 0.5 * sin(STRIPE_AVERAGE_DENSITY * atan(z.y, z.x));
+}
+
+// See fractal.frag::stripePaletteOffset.
+float stripePaletteOffset(float stripeTotal, float lastStripeValue, int stripeSamples, float magnitudeSq) {
+	if (u_stripeAverage != 1 || stripeSamples <= 0) return 0.0;
+	float stripeAverageValue = stripeTotal / float(stripeSamples);
+	if (stripeSamples == 1 || !isFiniteFloat(magnitudeSq) || magnitudeSq <= 1.000001) {
+		return stripeAverageValue * STRIPE_AVERAGE_COLOR_SCALE;
+	}
+	float previousAverage = (stripeTotal - lastStripeValue) / float(stripeSamples - 1);
+	float bailout = max(u_escapeRadius, STRIPE_AVERAGE_ESCAPE_RADIUS);
+	float frac = 1.0 + log2(log(bailout * bailout) / max(log(magnitudeSq), 1e-6));
+	float mixedAverage = mix(previousAverage, stripeAverageValue, clamp(frac, 0.0, 1.0));
+	return mixedAverage * STRIPE_AVERAGE_COLOR_SCALE;
 }
 
 float computeSlopeBrightness(vec2 z, vec2 dz) {
@@ -68,49 +98,68 @@ float computeSlopeBrightness(vec2 z, vec2 dz) {
 	float len = length(n);
 	if (!isFiniteFloat(len) || len < 1e-20) return 1.0;
 	n /= len;
-	float diffuse = (dot(n, SLOPE_LIGHT_DIR) + SLOPE_LIGHT_HEIGHT) / (1.0 + SLOPE_LIGHT_HEIGHT);
+	float lightHeight = max(u_slopeLightHeight, 1e-3);
+	float diffuse = (dot(n, normalize(u_slopeLightDir)) + lightHeight) / (1.0 + lightHeight);
 	diffuse = clamp(diffuse, 0.0, 1.0);
-	return 0.45 + 0.85 * diffuse;
+	return max(0.0, mix(1.0, 0.45 + 0.85 * diffuse, u_slopeLightIntensity));
 }
 
-vec2 distanceEstimateMetrics(vec2 z, vec2 dz, float logViewRadius, float pixelRadius) {
-	// Returns (boundarySignal, coverage):
-	//   boundarySignal: wide [0, 1] ramp, 1 right at the set boundary, 0 a few pixels out.
-	//     Drives palette/detail shifts near the boundary.
-	//   coverage: narrow [0, 1] sub-pixel ramp, 0 on the boundary, 1 a couple pixels out.
-	//     Drives in-set vs out-of-set blending (AA).
-	// Both come from the standard Milnor distance estimate, just with different smoothing widths.
+vec2 distanceEstimateMetrics(vec2 z, vec2 dz, float dzLogOffset, float logViewRadius, float pixelRadius) {
+	// boundarySignal comes from the Milnor distance estimate; coverage is always 1 since
+	// the caller only invokes this for escaped pixels (in deep zoom the distance falls
+	// far below a pixel and would otherwise blend toward the interior colour).
 	float mag = length(z);
-	float derivativeMag = length(dz);
-	if (!isFiniteFloat(mag) || !isFiniteFloat(derivativeMag) || mag <= 1.0 || derivativeMag <= 1e-20) {
+	float dzMantissaMag = length(dz);
+	if (!isFiniteFloat(mag) || !isFiniteFloat(dzMantissaMag) || mag <= 1.0 || dzMantissaMag <= 1e-20) {
 		return vec2(0.0, 1.0);
 	}
-	float logDistance = log(0.5 * mag * max(log(mag), 1e-6)) - log(derivativeMag);
+	float logDerivativeMag = log(dzMantissaMag) + dzLogOffset;
+	float logDistance = log(0.5 * mag * max(log(mag), 1e-6)) - logDerivativeMag;
 	float screenDistance = exp(clamp(logDistance - logViewRadius, -30.0, 30.0));
 	if (!isFiniteFloat(screenDistance)) return vec2(0.0, 1.0);
 	float boundarySignal = clamp(1.0 - smoothstep(0.003, 0.12, screenDistance), 0.0, 1.0);
-	float coverage = smoothstep(0.0, pixelRadius * 2.0, screenDistance);
-	return vec2(boundarySignal, coverage);
+	return vec2(boundarySignal, 1.0);
 }
 
-vec4 buildMetric(float smoothIters, float detailTotal, int detailSamples, float coverage, float slopeBrightness) {
+// See fractal.frag::buildMetric for the metric layout.
+vec4 buildMetric(
+	float smoothIters,
+	float detailTotal,
+	float stripeTotal,
+	float lastStripeValue,
+	int detailSamples,
+	float magnitudeSq,
+	float coverage,
+	float slopeBrightness
+) {
 	float detailAverage = detailSamples > 0 ? detailTotal / float(detailSamples) : 0.5;
 	float detailWeight = coverage < 0.5 ? 1.0 : smoothstep(3.0, 24.0, float(detailSamples));
-	float weightedDetailOffset = (detailAverage - 0.5) * detailWeight;
-	float weightedDetail = 0.5 + weightedDetailOffset;
-	float detailBrightness = mix(1.0, mix(0.82, 1.16, weightedDetail), detailWeight);
-	return vec4(smoothIters, weightedDetailOffset, detailBrightness * slopeBrightness, coverage);
+	float detailBrightness = mix(1.0, mix(0.82, 1.16, detailAverage), detailWeight);
+	float stripeOffset = stripePaletteOffset(stripeTotal, lastStripeValue, detailSamples, magnitudeSq);
+	float finalCoverage = max(coverage, float(u_stripeAverage));
+	return vec4(smoothIters, stripeOffset, detailBrightness * slopeBrightness, finalCoverage);
 }
 
-vec4 buildDistanceMetric(float smoothIters, vec2 z, vec2 dz, int detailSamples, float logViewRadius, float pixelRadius) {
+vec4 buildDistanceMetric(
+	float smoothIters,
+	vec2 z,
+	vec2 dz,
+	float dzLogOffset,
+	float stripeTotal,
+	float lastStripeValue,
+	int detailSamples,
+	float logViewRadius,
+	float pixelRadius
+) {
 	float detailWeight = smoothstep(4.0, 32.0, float(detailSamples));
-	vec2 deMetrics = distanceEstimateMetrics(z, dz, logViewRadius, pixelRadius);
+	vec2 deMetrics = distanceEstimateMetrics(z, dz, dzLogOffset, logViewRadius, pixelRadius);
 	float boundarySignal = deMetrics.x;
 	float coverage = deMetrics.y;
 	float slopeBrightness = u_slopeShading == 1 ? computeSlopeBrightness(z, dz) : 1.0;
-	float signedDetail = 0.5 * boundarySignal * detailWeight;
-	float detailBrightness = mix(1.0, mix(0.82, 1.16, 0.5 + signedDetail), detailWeight);
-	return vec4(smoothIters, signedDetail, detailBrightness * slopeBrightness, coverage);
+	float detailBrightness = mix(1.0, 1.16, boundarySignal * detailWeight);
+	float stripeOffset = stripePaletteOffset(stripeTotal, lastStripeValue, detailSamples, dot(z, z));
+	float finalCoverage = max(coverage, float(u_stripeAverage));
+	return vec4(smoothIters, stripeOffset, detailBrightness * slopeBrightness, finalCoverage);
 }
 
 void main() {
@@ -135,11 +184,15 @@ void main() {
 	vec3 orbitCurrent = orbit0;
 	float smoothIters = float(u_iterations);
 	float detailTotal = 0.0;
+	float stripeTotal = 0.0;
+	float lastStripeValue = 0.5;
 	int detailSamples = 0;
 	bool escaped = false;
 	vec2 derivative = isJulia ? vec2(1.0, 0.0) : vec2(0.0);
+	float derivativeLogOffset = 0.0;
 	vec2 finalZ = vec2(0.0);
 	vec2 finalDerivative = derivative;
+	float finalDerivativeLogOffset = 0.0;
 	float logViewRadius = log(max(abs(u_radiusMantissa), 1e-30)) + float(u_radiusExponent) * log(2.0);
 
 	// --- Series-approximation warm start (Mandelbrot quadratic only).
@@ -176,6 +229,11 @@ void main() {
 			k = u_polynomialLimit;
 			j = u_polynomialLimit;
 			orbitCurrent = getOrbit(k);
+			// SA skips iterations [1, polynomialLimit], so add back the reference-orbit
+			// stripe sum the JS side precomputed; without this the SA-stable region shows
+			// a circular seam where its stripe total disagrees with the rest of the frame.
+			stripeTotal += u_stripeAveragePresum;
+			detailSamples += u_polynomialLimit;
 		}
 	}
 
@@ -195,6 +253,11 @@ void main() {
 		if (!isJulia) {
 			derivative += vec2(1.0, 0.0);
 		}
+		float derivMagSq = dot(derivative, derivative);
+		if (isFiniteFloat(derivMagSq) && derivMagSq > DERIVATIVE_RESCALE_TRIGGER_SQ) {
+			derivative *= DERIVATIVE_RESCALE_FACTOR;
+			derivativeLogOffset += DERIVATIVE_RESCALE_LOG;
+		}
 
 		float unS = safeExp2(float(q) - orbitScalePrev);
 		float tx = 2.0 * orbitCurrent.x * dx - 2.0 * orbitCurrent.y * dy + unS * dx * dx - unS * dy * dy + dcx;
@@ -210,14 +273,15 @@ void main() {
 		float fx = orbitNext.x * referenceScale + S * dx;
 		float fy = orbitNext.y * referenceScale + S * dy;
 		float magnitudeSq = fx * fx + fy * fy;
-		float perturbationMagnitudeSq = S * S * (dx * dx + dy * dy);
 		bool finiteMagnitude = isFiniteFloat(magnitudeSq);
-		bool finitePerturbation = isFiniteFloat(perturbationMagnitudeSq);
 
 		if (finiteMagnitude) {
 			finalZ = vec2(fx, fy);
 			finalDerivative = derivative;
+			finalDerivativeLogOffset = derivativeLogOffset;
 			detailTotal += orbitDetailValue(finalZ);
+			lastStripeValue = stripeAverageAddend(finalZ);
+			stripeTotal += lastStripeValue;
 			detailSamples += 1;
 		}
 
@@ -228,7 +292,8 @@ void main() {
 			break;
 		}
 
-		if (magnitudeSq > u_escapeRadius * u_escapeRadius) {
+		float escapeRadius = u_stripeAverage == 1 ? max(u_escapeRadius, STRIPE_AVERAGE_ESCAPE_RADIUS) : u_escapeRadius;
+		if (magnitudeSq > escapeRadius * escapeRadius) {
 			smoothIters = smoothEscape(j, sqrt(magnitudeSq));
 			escaped = true;
 			orbitCurrent = orbitNext;
@@ -243,8 +308,11 @@ void main() {
 			S = safeExp2(float(q));
 		}
 
-		// mathr-style rebasing: rebase when |Z + z| < |z|.
-		if (finiteMagnitude && finitePerturbation && magnitudeSq < perturbationMagnitudeSq) {
+		// Iteration-extension rebase: when the reference orbit runs out, fold the current
+		// full z into a fresh perturbation from orbit[0] = 0. The trigger fires at the
+		// same iteration for every pixel, so it can't produce a per-pixel circular seam
+		// (which a |Z+z| < |z| trigger does).
+		if (k >= orbitLength - 1 && !isJulia) {
 			float referenceStartScale = safeExp2(orbit0.z);
 			dx = fx - orbit0.x * referenceStartScale;
 			dy = fy - orbit0.y * referenceStartScale;
@@ -258,9 +326,19 @@ void main() {
 	}
 
 	if (escaped) {
-		FragColor = buildDistanceMetric(smoothIters, finalZ, finalDerivative, detailSamples, logViewRadius, pixelRadius);
+		FragColor = buildDistanceMetric(
+			smoothIters,
+			finalZ,
+			finalDerivative,
+			finalDerivativeLogOffset,
+			stripeTotal,
+			lastStripeValue,
+			detailSamples,
+			logViewRadius,
+			pixelRadius
+		);
 	} else {
-		FragColor = buildMetric(smoothIters, detailTotal, detailSamples, 0.0, 1.0);
+		FragColor = buildMetric(smoothIters, detailTotal, stripeTotal, lastStripeValue, detailSamples, 0.0, 0.0, 1.0);
 	}
 }
 `;

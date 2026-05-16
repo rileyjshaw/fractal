@@ -4,6 +4,8 @@ import { GMPUtils, maxAbsWide, multiplyWide, toFloat } from './gmpUtils.js';
 // The 4th channel is currently unused (zero-padded); reserve it for future per-step data
 // (e.g. precomputed series-approximation polynomial flags) without changing the texel layout.
 const ORBIT_TEXTURE_SIZE = 1024;
+// Must match STRIPE_AVERAGE_DENSITY in perturbationShader.js / fractal.frag.
+const STRIPE_AVERAGE_DENSITY = 8.0;
 const ORBIT_TEXTURE_CHANNELS = 4;
 const ORBIT_TEXTURE_PIXELS = ORBIT_TEXTURE_SIZE * ORBIT_TEXTURE_SIZE;
 const ORBIT_TEXTURE_LENGTH = ORBIT_TEXTURE_PIXELS * ORBIT_TEXTURE_CHANNELS;
@@ -167,6 +169,20 @@ export class DeepZoomManager {
 		return textureData;
 	}
 
+	computeStripeAveragePresum(orbit, polynomialLimit) {
+		// Pre-sum stripeAverageAddend(z_i) over the reference orbit for i in [1, polynomialLimit];
+		// added back inside the SA warm start to cancel the seam at the SA-stable boundary.
+		if (polynomialLimit <= 0) return 0;
+		const limit = Math.min(polynomialLimit, Math.floor(orbit.length / 3) - 1);
+		let sum = 0;
+		for (let i = 1; i <= limit; i++) {
+			const refX = orbit[i * 3];
+			const refY = orbit[i * 3 + 1];
+			sum += 0.5 + 0.5 * Math.sin(STRIPE_AVERAGE_DENSITY * Math.atan2(refY, refX));
+		}
+		return sum;
+	}
+
 	getOrbitTextureSource() {
 		if (!this.orbitTextureData) return null;
 		return {
@@ -185,6 +201,7 @@ export class DeepZoomManager {
 		const compatibilitySignature = this.referenceState?.compatibilitySignature;
 		const isMandelbrotQuadratic = compatibilitySignature?.startsWith(`${FRACTAL_TYPE_MANDELBROT}|2|`) ?? false;
 		const polynomialLimit = isMandelbrotQuadratic ? this.referenceData.polynomialLimit : 0;
+		const stripeAveragePresum = isMandelbrotQuadratic ? (this.referenceData.stripeAveragePresum ?? 0) : 0;
 
 		// Rebake the polynomial coefficients against the *current* view radius (rather
 		// than the radius captured at reference-orbit compute time). The wide-form
@@ -236,6 +253,7 @@ export class DeepZoomManager {
 			],
 			u_polynomialLimit: polynomialLimit,
 			u_polyScaleExponent: polyScaleExponent,
+			u_stripeAveragePresum: stripeAveragePresum,
 			u_radiusMantissa: radiusMantissa,
 			u_radiusExponent: radiusExponent,
 		};
@@ -275,6 +293,10 @@ export class DeepZoomManager {
 					return this.orbitTextureData;
 				}
 
+				referenceData.stripeAveragePresum = this.computeStripeAveragePresum(
+					referenceData.orbit,
+					referenceData.polynomialLimit,
+				);
 				this.referenceData = referenceData;
 				this.referenceState = {
 					centerRealExact: state.centerRealExact ?? state.centerReal,

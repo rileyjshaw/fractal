@@ -92,8 +92,12 @@ p {
 
 #desktop-controls,
 #touch-controls {
-	display: none;
 	margin-bottom: 3em;
+}
+
+#desktop-controls,
+#touch-controls {
+	display: none;
 }
 
 .controls-heading {
