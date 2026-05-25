@@ -1,10 +1,18 @@
+import {
+	BLA_BASE_CHUNK_SIZE,
+	BLA_LEVEL_STRIDE,
+	BLA_MAX_LEVELS,
+	BLA_TEXTURE_WIDTH,
+	ORBIT_TEXTURE_SIZE,
+} from './deepZoomTables.js';
+
 export function generatePerturbationShader() {
 	return `#version 300 es
 precision highp float;
 
 #define FRACTAL_TYPE_JULIA 0
 #define FRACTAL_TYPE_MANDELBROT 1
-#define ORBIT_TEXTURE_SIZE 1024
+#define ORBIT_TEXTURE_SIZE ${ORBIT_TEXTURE_SIZE}
 #define MIN_SERIES_APPROXIMATION_ITERATIONS 16
 #define SERIES_APPROXIMATION_SAFETY_RATIO 0.001
 #define BAILOUT_PERTURBATION_DELTA_SQ 1.0e6
@@ -13,18 +21,20 @@ precision highp float;
 #define DERIVATIVE_RESCALE_TRIGGER_SQ 1.0e30
 #define DERIVATIVE_RESCALE_FACTOR 1.0e-15
 #define DERIVATIVE_RESCALE_LOG 34.538776394910684
-// Must match BLA_CHUNK_SIZE and BLA_TEXTURE_WIDTH in deepZoom.js.
-#define BLA_CHUNK_SIZE 32
-#define BLA_TEXTURE_WIDTH 1024
+#define BLA_BASE_CHUNK_SIZE ${BLA_BASE_CHUNK_SIZE}
+#define BLA_MAX_LEVELS ${BLA_MAX_LEVELS}
+#define BLA_LEVEL_STRIDE ${BLA_LEVEL_STRIDE}
+#define BLA_TEXTURE_WIDTH ${BLA_TEXTURE_WIDTH}
 
 uniform sampler2D u_orbitTexture;
-// BLA (Bivariate Linear Approximation) table: precomputed per-position
-// composed coefficients (A, B) so the shader can skip BLA_CHUNK_SIZE perturbation
-// iterations in one texture fetch when |dz| is small enough that the dropped
-// dz² term is negligible. Two RGBA32F texels per orbit position:
+// Hierarchical BLA (Bivariate Linear Approximation) table. Each level doubles
+// the skip length from BLA_BASE_CHUNK_SIZE; the shader tries largest first and
+// falls back to scalar perturbation when validity rejects a pixel.
+// Two RGBA32F texels per level/position:
 //   texel 0: [A.x, A.y, A_scaleExp, validityRsqLog2]
 //   texel 1: [B.x, B.y, B_scaleExp, _unused_]
 uniform sampler2D u_blaTable;
+uniform sampler2D u_visualPrefixTexture;
 uniform vec2 u_resolution;
 uniform int u_iterations;
 uniform int u_orbitLength;
@@ -101,12 +111,19 @@ vec3 getOrbit(int i) {
 
 // Returns the two BLA texels for orbit position k. .a member of texel A holds
 // the validity threshold log2(R²); .a of texel B is unused.
-void getBLA(int k, out vec4 entryA, out vec4 entryB) {
-	int texelA = k * 2;
+void getBLA(int level, int k, out vec4 entryA, out vec4 entryB) {
+	int entryIndex = level * BLA_LEVEL_STRIDE + k;
+	int texelA = entryIndex * 2;
 	int rowA = texelA / BLA_TEXTURE_WIDTH;
 	int colA = texelA - rowA * BLA_TEXTURE_WIDTH;
 	entryA = texelFetch(u_blaTable, ivec2(colA, rowA), 0);
 	entryB = texelFetch(u_blaTable, ivec2(colA + 1, rowA), 0);
+}
+
+vec4 getVisualPrefix(int i) {
+	int row = i / ORBIT_TEXTURE_SIZE;
+	int col = i - row * ORBIT_TEXTURE_SIZE;
+	return texelFetch(u_visualPrefixTexture, ivec2(col, row), 0);
 }
 
 float smoothEscape(int iteration, float magnitude) {
@@ -296,113 +313,107 @@ void main() {
 
 		j += 1;
 
-		// BLA opportunity: try to skip BLA_CHUNK_SIZE perturbation iterations in
-		// one texture fetch. Valid when |dz|² is small enough that the dropped
-		// dz² term is negligible (precomputed validity threshold R² stored as
-		// log2 in blaA.w). The chunk's composed A multiplies dz, and B
-		// accumulates the dc contribution over the chunk.
-		// Leave at least one orbit sample for the scalar path so the reference-end
-		// rebase below always gets a chance to run.
-		if (k + BLA_CHUNK_SIZE < orbitLength - 1 && j + BLA_CHUNK_SIZE - 1 <= u_iterations) {
+		bool usedBLA = false;
+		for (int blaLevel = BLA_MAX_LEVELS - 1; blaLevel >= 0; blaLevel--) {
+			int blaChunkSize = BLA_BASE_CHUNK_SIZE << blaLevel;
+			// Leave at least one orbit sample for the scalar path so the reference-end
+			// rebase below always gets a chance to run.
+			if (k + blaChunkSize >= orbitLength - 1 || j + blaChunkSize - 1 > u_iterations) continue;
+
 			vec4 blaA, blaB;
-			getBLA(k, blaA, blaB);
+			getBLA(blaLevel, k, blaA, blaB);
 			float dzMagSq = dx * dx + dy * dy;
-			if (dzMagSq > 0.0) {
-				// |dz|²_absolute = dzMagSq * 2^(2q); R²_log2 is also in absolute terms.
-				float dzLogMagSq = log2(dzMagSq) + 2.0 * float(q);
-				if (dzLogMagSq < blaA.w) {
-					vec2 aMantissa = blaA.xy;
-					int aExp = int(blaA.z);
+			float dcMagSq = baseDeltaX * baseDeltaX + baseDeltaY * baseDeltaY;
+			float dzLogMagSq = dzMagSq > 0.0 ? log2(dzMagSq) + 2.0 * float(q) : -1.0e30;
+			float dcLogMagSq = (!isJulia && dcMagSq > 0.0) ? log2(dcMagSq) + 2.0 * float(cq) : -1.0e30;
+			// BLA validity is in absolute terms and bounds max(|dz|, |dc|).
+			if (max(dzLogMagSq, dcLogMagSq) < blaA.w) {
+				vec2 aMantissa = blaA.xy;
+				int aExp = int(blaA.z);
 
-					// Tentatively compute BLA result; don't commit until post-check
-					// confirms the pixel hasn't escaped within the chunk.
-					float aDx = aMantissa.x * dx - aMantissa.y * dy;
-					float aDy = aMantissa.x * dy + aMantissa.y * dx;
-					int aTermExp = q + aExp;
-					int newQ = aTermExp;
-					float newDx = 0.0;
-					float newDy = 0.0;
+				// Tentatively compute BLA result; don't commit until post-check
+				// confirms the pixel hasn't escaped within the chunk.
+				float aDx = aMantissa.x * dx - aMantissa.y * dy;
+				float aDy = aMantissa.x * dy + aMantissa.y * dx;
+				int aTermExp = q + aExp;
+				int newQ = aTermExp;
+				float newDx = 0.0;
+				float newDy = 0.0;
 
-					if (!isJulia) {
+				if (!isJulia) {
+					vec2 bMantissa = blaB.xy;
+					int bExp = int(blaB.z);
+					float bDx = bMantissa.x * baseDeltaX - bMantissa.y * baseDeltaY;
+					float bDy = bMantissa.x * baseDeltaY + bMantissa.y * baseDeltaX;
+					int bTermExp = bExp + cq;
+					newQ = max(aTermExp, bTermExp);
+					float aScale = downscaleToExponent(aTermExp, newQ);
+					float bScale = downscaleToExponent(bTermExp, newQ);
+					newDx = aDx * aScale + bDx * bScale;
+					newDy = aDy * aScale + bDy * bScale;
+				} else {
+					newDx = aDx;
+					newDy = aDy;
+				}
+				normalizePerturbation(newDx, newDy, newQ);
+
+				// Post-BLA escape check. The linear approximation breaks when the
+				// pixel truly escapes within the chunk — the dropped dz² term
+				// becomes dominant and BLA's predicted dz_after is wrong. If
+				// |Z + dz_after| at the chunk end exceeds escape, BLA's prediction
+				// is unreliable; fall through to per-iter (correct but slower).
+				// Without this check the wrong |z| feeds smoothEscape() and
+				// produces banded coloring concentric with whatever minibrot the
+				// pixel was near.
+				float newS = safeExp2(float(newQ));
+				vec3 chunkEndOrbit = getOrbit(k + blaChunkSize);
+				float chunkEndScale = safeExp2(chunkEndOrbit.z);
+				float chunkZx = chunkEndOrbit.x * chunkEndScale + newS * newDx;
+				float chunkZy = chunkEndOrbit.y * chunkEndScale + newS * newDy;
+				float chunkZMagSq = chunkZx * chunkZx + chunkZy * chunkZy;
+				float escapeRadiusCheck = u_stripeAverage == 1 ? max(u_escapeRadius, STRIPE_AVERAGE_ESCAPE_RADIUS) : u_escapeRadius;
+				if (isFiniteFloat(chunkZMagSq) && chunkZMagSq < escapeRadiusCheck * escapeRadiusCheck) {
+					vec4 prefixBefore = getVisualPrefix(k);
+					vec4 prefixAfter = getVisualPrefix(k + blaChunkSize);
+
+					// Keep visual accumulators continuous across the BLA validity
+					// boundary. The reference samples are a good approximation exactly
+					// where BLA is valid because perturbations are small by definition.
+					detailTotal += prefixAfter.x - prefixBefore.x;
+					stripeTotal += prefixAfter.y - prefixBefore.y;
+					lastStripeValue = prefixAfter.z;
+					detailSamples += blaChunkSize;
+
+					if (isJulia) {
+						derivative = cmul(aMantissa, derivative);
+						derivativeLogOffset += float(aExp) * LOG_2;
+					} else {
 						vec2 bMantissa = blaB.xy;
 						int bExp = int(blaB.z);
-						float bDx = bMantissa.x * baseDeltaX - bMantissa.y * baseDeltaY;
-						float bDy = bMantissa.x * baseDeltaY + bMantissa.y * baseDeltaX;
-						int bTermExp = bExp + cq;
-						newQ = max(aTermExp, bTermExp);
-						float aScale = downscaleToExponent(aTermExp, newQ);
-						float bScale = downscaleToExponent(bTermExp, newQ);
-						newDx = aDx * aScale + bDx * bScale;
-						newDy = aDy * aScale + bDy * bScale;
-					} else {
-						newDx = aDx;
-						newDy = aDy;
+						vec2 aDerivative = cmul(aMantissa, derivative);
+						float aLogScale = derivativeLogOffset + float(aExp) * LOG_2;
+						float bLogScale = float(bExp) * LOG_2;
+						float commonLogScale = max(aLogScale, bLogScale);
+						float aDerivativeScale = exp(clamp(aLogScale - commonLogScale, -80.0, 0.0));
+						float bDerivativeScale = exp(clamp(bLogScale - commonLogScale, -80.0, 0.0));
+						derivative = aDerivative * aDerivativeScale + bMantissa * bDerivativeScale;
+						derivativeLogOffset = commonLogScale;
 					}
-					normalizePerturbation(newDx, newDy, newQ);
+					rescaleDerivative(derivative, derivativeLogOffset);
 
-					// Post-BLA escape check. The linear approximation breaks when the
-					// pixel truly escapes within the chunk — the dropped dz² term
-					// becomes dominant and BLA's predicted dz_after is wrong. If
-					// |Z + dz_after| at the chunk end exceeds escape, BLA's prediction
-					// is unreliable; fall through to per-iter (correct but slower).
-					// Without this check the wrong |z| feeds smoothEscape() and
-					// produces banded coloring concentric with whatever minibrot the
-					// pixel was near.
-					float newS = safeExp2(float(newQ));
-					vec3 chunkEndOrbit = getOrbit(k + BLA_CHUNK_SIZE);
-					float chunkEndScale = safeExp2(chunkEndOrbit.z);
-					float chunkZx = chunkEndOrbit.x * chunkEndScale + newS * newDx;
-					float chunkZy = chunkEndOrbit.y * chunkEndScale + newS * newDy;
-					float chunkZMagSq = chunkZx * chunkZx + chunkZy * chunkZy;
-					float escapeRadiusCheck = u_stripeAverage == 1 ? max(u_escapeRadius, STRIPE_AVERAGE_ESCAPE_RADIUS) : u_escapeRadius;
-					if (isFiniteFloat(chunkZMagSq) && chunkZMagSq < escapeRadiusCheck * escapeRadiusCheck) {
-						float skippedStripeTotal = 0.0;
-						float skippedLastStripeValue = lastStripeValue;
-						for (int skip = 1; skip <= BLA_CHUNK_SIZE; skip++) {
-							vec3 skippedOrbit = getOrbit(k + skip);
-							float skippedScale = safeExp2(skippedOrbit.z);
-							vec2 skippedZ = skippedOrbit.xy * skippedScale;
-							detailTotal += orbitDetailValue(skippedZ);
-							skippedLastStripeValue = stripeAverageAddend(skippedZ);
-							skippedStripeTotal += skippedLastStripeValue;
-						}
-
-						// Keep visual accumulators continuous across the BLA validity
-						// boundary. The reference samples are a good approximation exactly
-						// where BLA is valid because perturbations are small by definition.
-						stripeTotal += skippedStripeTotal;
-						lastStripeValue = skippedLastStripeValue;
-						detailSamples += BLA_CHUNK_SIZE;
-
-						if (isJulia) {
-							derivative = cmul(aMantissa, derivative);
-							derivativeLogOffset += float(aExp) * LOG_2;
-						} else {
-							vec2 bMantissa = blaB.xy;
-							int bExp = int(blaB.z);
-							vec2 aDerivative = cmul(aMantissa, derivative);
-							float aLogScale = derivativeLogOffset + float(aExp) * LOG_2;
-							float bLogScale = float(bExp) * LOG_2;
-							float commonLogScale = max(aLogScale, bLogScale);
-							float aDerivativeScale = exp(clamp(aLogScale - commonLogScale, -80.0, 0.0));
-							float bDerivativeScale = exp(clamp(bLogScale - commonLogScale, -80.0, 0.0));
-							derivative = aDerivative * aDerivativeScale + bMantissa * bDerivativeScale;
-							derivativeLogOffset = commonLogScale;
-						}
-						rescaleDerivative(derivative, derivativeLogOffset);
-
-						dx = newDx;
-						dy = newDy;
-						q = newQ;
-						S = newS;
-						k += BLA_CHUNK_SIZE;
-						j += BLA_CHUNK_SIZE - 1;
-						orbitCurrent = chunkEndOrbit;
-						continue;
-					}
+					dx = newDx;
+					dy = newDy;
+					q = newQ;
+					S = newS;
+					k += blaChunkSize;
+					j += blaChunkSize - 1;
+					orbitCurrent = chunkEndOrbit;
+					usedBLA = true;
+					break;
 				}
 			}
 		}
+		if (usedBLA) continue;
 
 		int orbitScalePrev = int(orbitCurrent.z);
 		float previousReferenceScale = safeExp2(float(orbitScalePrev));

@@ -58,6 +58,7 @@ const DEEP_COMPATIBLE_REFERENCE_MAX_OFFSET = 2.5;
 // different per-pixel perturbation result), so trading some perturbation
 // accuracy at large offsets for fewer jumps reads as much smoother.
 const DEEP_REFERENCE_RECENTER_OFFSET = 2.0;
+const DEEP_SETTLED_REFERENCE_RECENTER_OFFSET = 1.0;
 // Start computing the deep reference orbit this many zoom units before crossing the
 // deep-zoom threshold so the orbit is ready by the time the user actually needs it.
 const DEEP_ZOOM_PREPARATION_MARGIN_EXPONENT = 3;
@@ -984,7 +985,10 @@ function shouldRecenterDeepReference(renderState) {
 	const referenceOffset = deepZoomManager.getReferenceOffsetFor(renderState);
 	if (!referenceOffset) return true;
 	const maxOffset = Math.max(Math.abs(referenceOffset.offsetReal), Math.abs(referenceOffset.offsetImag));
-	return !Number.isFinite(maxOffset) || maxOffset > DEEP_REFERENCE_RECENTER_OFFSET;
+	const recenterOffset = isDeepInteractionInMotion
+		? DEEP_REFERENCE_RECENTER_OFFSET
+		: DEEP_SETTLED_REFERENCE_RECENTER_OFFSET;
+	return !Number.isFinite(maxOffset) || maxOffset > recenterOffset;
 }
 
 function getStandardIterationBudget(zoom) {
@@ -1065,7 +1069,8 @@ function syncDeepOrbitTexture() {
 
 	const orbitTextureSource = deepZoomManager.getOrbitTextureSource();
 	const blaTextureSource = deepZoomManager.getBLATextureSource();
-	if (!orbitTextureSource || !blaTextureSource) return;
+	const visualPrefixTextureSource = deepZoomManager.getVisualPrefixTextureSource();
+	if (!orbitTextureSource || !blaTextureSource || !visualPrefixTextureSource) return;
 
 	if (lastUploadedDeepOrbitSignature === deepZoomManager.referenceSignature) return;
 
@@ -1075,10 +1080,16 @@ function syncDeepOrbitTexture() {
 			// BLA table uses the same RGBA32F NEAREST options as the orbit texture —
 			// both are sampled by index, not interpolated.
 			deepIterationRenderer.initializeTexture('u_blaTable', blaTextureSource, ORBIT_TEXTURE_OPTIONS);
+			deepIterationRenderer.initializeTexture(
+				'u_visualPrefixTexture',
+				visualPrefixTextureSource,
+				ORBIT_TEXTURE_OPTIONS,
+			);
 		} else {
 			deepIterationRenderer.updateTextures({
 				u_orbitTexture: orbitTextureSource,
 				u_blaTable: blaTextureSource,
+				u_visualPrefixTexture: visualPrefixTextureSource,
 			});
 		}
 	});
@@ -1336,7 +1347,9 @@ function render(time) {
 	const renderState = profiler.measure('frame:getRenderState', () => getRenderState());
 	const requestedDeepZoom = isDeepZoomRequested(renderState.zoom);
 	const deepZoomSupport = deepZoomManager.supportsState(state);
-	profiler.measure('frame:ensureDeepPrep', () => ensureDeepZoomPreparation(renderState, requestedDeepZoom, deepZoomSupport));
+	profiler.measure('frame:ensureDeepPrep', () =>
+		ensureDeepZoomPreparation(renderState, requestedDeepZoom, deepZoomSupport),
+	);
 	maybeShowUnsupportedDeepZoomNotice(requestedDeepZoom, deepZoomSupport);
 
 	const canRenderDeep =
@@ -1379,7 +1392,9 @@ function render(time) {
 	}
 
 	ensureDisplayRenderer(renderState, iterationRenderer);
-	profiler.measure('display:updateTextures', () => displayRenderer.updateTextures({ u_liveMetrics: iterationRenderer }));
+	profiler.measure('display:updateTextures', () =>
+		displayRenderer.updateTextures({ u_liveMetrics: iterationRenderer }),
+	);
 	profiler.measure('display:updateUniforms', () => updateDisplayUniforms(renderState));
 	profiler.measureGL('display:draw (GPU)', () => displayRenderer.draw());
 
