@@ -1,8 +1,7 @@
 import { GMPUtils, maxAbsWide, multiplyWide, toFloat } from './gmpUtils.js';
+import * as profiler from './profiler.js';
 
-// One RGBA32F texel per orbit step: R = real, G = imag, B = scale exponent, A = reserved.
-// The 4th channel is currently unused (zero-padded); reserve it for future per-step data
-// (e.g. precomputed series-approximation polynomial flags) without changing the texel layout.
+// One RGBA32F texel per orbit step: R = real, G = imag, B = scale exponent, A = unused.
 const ORBIT_TEXTURE_SIZE = 1024;
 // Must match STRIPE_AVERAGE_DENSITY in perturbationShader.js / fractal.frag.
 const STRIPE_AVERAGE_DENSITY = 8.0;
@@ -13,6 +12,34 @@ const FRACTAL_TYPE_JULIA = 0;
 const FRACTAL_TYPE_MANDELBROT = 1;
 const SUPPORTED_FRACTAL_TYPES = new Set([FRACTAL_TYPE_JULIA, FRACTAL_TYPE_MANDELBROT]);
 const SUPPORTED_EXPONENTS = new Set([2]); // Quadratic only for now.
+// When the requested center's reference orbit escapes before reaching this fraction
+// of u_iterations, sample nearby centers and pick one with a longer orbit. Short
+// orbits leave the perturbation shader's loop terminating at k>=orbitLength-1, so
+// every still-unescaped pixel returns interiorMetric() — the whole view goes solid.
+const REFERENCE_ESCAPE_SEARCH_RATIO = 0.95;
+// Max distance (in view radii) Newton's converged periodic point may sit from the
+// requested center. Kept under DEEP_REFERENCE_RECENTER_OFFSET (main.js) so the chosen
+// center doesn't immediately re-trigger a recenter.
+const NEWTON_MAX_OFFSET_RADII = 1.5;
+// Sample radii kept under DEEP_REFERENCE_RECENTER_OFFSET (main.js) so a chosen sample
+// doesn't immediately re-trigger a recenter. Six rings × eight directions = 48
+// candidates spanning ~36x in radius — tiny minibrots at deep zoom can be smaller
+// than a few percent of the view, so the inner rings give us a chance of landing
+// inside one when the requested center is just outside.
+const REFERENCE_SAMPLE_OFFSETS = [
+	[0.05, 0], [-0.05, 0], [0, 0.05], [0, -0.05],
+	[0.035, 0.035], [-0.035, 0.035], [0.035, -0.035], [-0.035, -0.035],
+	[0.15, 0], [-0.15, 0], [0, 0.15], [0, -0.15],
+	[0.1, 0.1], [-0.1, 0.1], [0.1, -0.1], [-0.1, -0.1],
+	[0.35, 0], [-0.35, 0], [0, 0.35], [0, -0.35],
+	[0.25, 0.25], [-0.25, 0.25], [0.25, -0.25], [-0.25, -0.25],
+	[0.7, 0], [-0.7, 0], [0, 0.7], [0, -0.7],
+	[0.5, 0.5], [-0.5, 0.5], [0.5, -0.5], [-0.5, -0.5],
+	[1.2, 0], [-1.2, 0], [0, 1.2], [0, -1.2],
+	[0.85, 0.85], [-0.85, 0.85], [0.85, -0.85], [-0.85, -0.85],
+	[1.8, 0], [-1.8, 0], [0, 1.8], [0, -1.8],
+	[1.27, 1.27], [-1.27, 1.27], [1.27, -1.27], [-1.27, -1.27],
+];
 
 export class DeepZoomManager {
 	constructor({ threshold = 16 } = {}) {
@@ -259,6 +286,101 @@ export class DeepZoomManager {
 		};
 	}
 
+	async findGoodReferenceCenter(centerReal, centerImag, radius, requiredIterations, targetIterations, options, requestId) {
+		// Strategy A — Newton-on-period.
+		// Deterministically converge to a periodic point near the requested center.
+		// Periodic points have provably non-escaping orbits, so orbitLength always
+		// reaches targetIterations and no pixel falls through the shader's iteration
+		// cap. This is the only way to fix the "small pan → minibrot disappears"
+		// class of bug — grid sampling is inherently lucky/unlucky depending on
+		// whether a sample lands inside a small minibrot. Works for both Mandelbrot
+		// (solve f^p_c(0) = 0 in c) and Julia (solve f^p_c(z) = z in z, with c fixed
+		// at the user's parameter).
+		const newtonCenter = await profiler.measureAsync('ref:newton.search', () =>
+			this.gmp.findPeriodicReferenceCenter(
+				centerReal,
+				centerImag,
+				// The Newton-found center must stay within the recenter envelope or it
+				// would immediately re-trigger a recompute. Bound at NEWTON_MAX_OFFSET_RADII
+				// view radii — well under DEEP_REFERENCE_RECENTER_OFFSET so the chosen
+				// center won't immediately re-trigger a recenter.
+				this.gmp.scaleValue(radius, NEWTON_MAX_OFFSET_RADII),
+				{
+					fractalType: options.fractalType,
+					cReal: options.cReal,
+					cImaginary: options.cImaginary,
+					// Bail mid-Newton if a newer recompute has been requested (user kept
+					// panning). Avoids burning ~1s of MPFR work on a result that will be discarded.
+					isAborted: () => requestId !== this.referenceRequestId,
+				},
+			),
+		);
+		if (newtonCenter && requestId === this.referenceRequestId) {
+			profiler.note('ref:newton.period', newtonCenter.period);
+			const finalResult = profiler.measure('ref:newton.computeFinalOrbit', () =>
+				this.gmp.computeReferenceData(
+					newtonCenter.centerReal,
+					newtonCenter.centerImag,
+					radius,
+					targetIterations,
+					options,
+				),
+			);
+			profiler.note('ref:orbitLength', finalResult.orbitLength);
+			return {
+				...finalResult,
+				centerRealExact: newtonCenter.centerReal,
+				centerImagExact: newtonCenter.centerImag,
+			};
+		}
+
+		// Strategy B — grid sampling fallback.
+		// Two-phase: cheap sample at requiredIterations (= u_iterations the shader will
+		// actually run), then recompute selected center at full targetIterations. Used
+		// when Newton can't find a periodic point (view far from any periodic structure,
+		// period > maxPeriod, Newton diverged outside the bound, etc.).
+		const acceptableOrbitLength = Math.ceil(requiredIterations * REFERENCE_ESCAPE_SEARCH_RATIO);
+
+		let bestCenterReal = centerReal;
+		let bestCenterImag = centerImag;
+		let bestOrbitLength = -1;
+
+		const trySample = (sReal, sImag) => {
+			const result = profiler.measure('ref:sample.computeOrbit', () =>
+				this.gmp.computeReferenceData(sReal, sImag, radius, requiredIterations, options),
+			);
+			if (result.orbitLength > bestOrbitLength) {
+				bestCenterReal = sReal;
+				bestCenterImag = sImag;
+				bestOrbitLength = result.orbitLength;
+			}
+			return bestOrbitLength >= acceptableOrbitLength;
+		};
+
+		if (!trySample(centerReal, centerImag) && requestId === this.referenceRequestId) {
+			for (const [offsetReal, offsetImag] of REFERENCE_SAMPLE_OFFSETS) {
+				// Yield so the render loop and input handlers stay responsive; each
+				// computeReferenceData at deep zoom can take tens of ms.
+				await new Promise(resolve => setTimeout(resolve, 0));
+				if (requestId !== this.referenceRequestId) break;
+
+				const offset = this.gmp.translateCenter(centerReal, centerImag, radius, offsetReal, offsetImag);
+				if (trySample(offset.centerReal, offset.centerImag)) break;
+			}
+		}
+
+		profiler.note('ref:sample.bestOrbitLength', bestOrbitLength);
+		const finalResult = profiler.measure('ref:sample.computeFinalOrbit', () =>
+			this.gmp.computeReferenceData(bestCenterReal, bestCenterImag, radius, targetIterations, options),
+		);
+		profiler.note('ref:orbitLength', finalResult.orbitLength);
+		return {
+			...finalResult,
+			centerRealExact: bestCenterReal,
+			centerImagExact: bestCenterImag,
+		};
+	}
+
 	async ensureReference(state) {
 		if (!this.isInitialized) {
 			throw new Error('Deep zoom manager not initialized');
@@ -276,16 +398,18 @@ export class DeepZoomManager {
 		this.pendingReferenceSignature = signature;
 		this.pendingReferencePromise = Promise.resolve()
 			.then(() =>
-				this.gmp.computeReferenceData(
+				this.findGoodReferenceCenter(
 					state.centerRealExact ?? state.centerReal,
 					state.centerImagExact ?? state.centerImag,
 					state.radiusExact ?? state.radius,
+					state.requiredIterations ?? state.deepIterations ?? state.iterations,
 					state.deepIterations ?? state.iterations,
 					{
 						fractalType: state.fractalType,
 						cReal: state.cReal,
 						cImaginary: state.cImaginary,
 					},
+					requestId,
 				),
 			)
 			.then(referenceData => {
@@ -298,9 +422,11 @@ export class DeepZoomManager {
 					referenceData.polynomialLimit,
 				);
 				this.referenceData = referenceData;
+				// Track the center that was actually iterated (findGoodReferenceCenter may
+				// have shifted it). getReferenceOffsetFor reads this to build u_referenceOffset.
 				this.referenceState = {
-					centerRealExact: state.centerRealExact ?? state.centerReal,
-					centerImagExact: state.centerImagExact ?? state.centerImag,
+					centerRealExact: referenceData.centerRealExact,
+					centerImagExact: referenceData.centerImagExact,
 					radiusExact: state.radiusExact ?? state.radius,
 					referenceIterations: state.deepIterations ?? state.iterations,
 					compatibilitySignature: this.getReferenceCompatibilitySignature(state),

@@ -1,10 +1,11 @@
 #version 300 es
 precision highp float;
 
-#define N_COLORS 32
-
+// Iteration pass: outputs the per-pixel metric (smoothIters, stripeOffset,
+// brightness, coverage) to an FBO. The downstream display shader
+// (deepDisplayShader.js) reads this metric and applies the palette. Palette
+// animation only re-runs the cheap display pass.
 uniform vec2 u_resolution;
-uniform float u_paletteFrame;
 uniform vec2 u_center;
 uniform float u_zoom;
 uniform int u_fractalType;
@@ -12,10 +13,8 @@ uniform int u_exponent;
 uniform float u_cReal;
 uniform float u_cImaginary;
 uniform int u_iterations;
-uniform vec3 u_colors[N_COLORS];
 uniform float u_escapeRadius;
 uniform float u_logEscapeRadius;
-uniform float u_colorScale;
 uniform int u_slopeShading;
 uniform vec2 u_slopeLightDir;
 uniform float u_slopeLightHeight;
@@ -25,8 +24,8 @@ uniform int u_stripeAverage;
 out vec4 FragColor;
 
 const float STRIPE_AVERAGE_DENSITY = 8.0;
-// One full palette wrap per unit of stripe variation.
-const float STRIPE_AVERAGE_COLOR_SCALE = float(N_COLORS);
+// Must match STRIPE_AVERAGE_COLOR_SCALE in deepDisplayShader.js (= N_COLORS there).
+const float STRIPE_AVERAGE_COLOR_SCALE = 32.0;
 const float STRIPE_AVERAGE_ESCAPE_RADIUS = 64.0;
 
 vec2 cmul(vec2 a, vec2 b) {
@@ -133,6 +132,15 @@ vec4 buildMetric(
 	return vec4(smoothIters, stripeOffset, detailBrightness * slopeBrightness, finalCoverage);
 }
 
+// Stable metric for non-escaping (interior) pixels. With stripe averaging off,
+// coverage=0 routes the display to insideColor and the iteration count is unused.
+// With stripe on, coverage is forced to 1 and the palette is sampled at offset 0
+// so the interior renders a single, zoom-independent color instead of drifting as
+// u_iterations grows and the orbit sum keeps accumulating.
+vec4 interiorMetric() {
+	return vec4(0.0, 0.0, 1.0, float(u_stripeAverage));
+}
+
 vec4 buildDistanceMetric(
 	float smoothIters,
 	vec2 z,
@@ -152,36 +160,6 @@ vec4 buildDistanceMetric(
 	float stripeOffset = stripePaletteOffset(stripeTotal, lastStripeValue, detailSamples, dot(z, z));
 	float finalCoverage = max(coverage, float(u_stripeAverage));
 	return vec4(smoothIters, stripeOffset, detailBrightness * slopeBrightness, finalCoverage);
-}
-
-vec3 srgbToLinear(vec3 color) {
-	color = clamp(color, 0.0, 1.0);
-	vec3 lower = color / 12.92;
-	vec3 higher = pow((color + 0.055) / 1.055, vec3(2.4));
-	return mix(higher, lower, lessThanEqual(color, vec3(0.04045)));
-}
-
-vec3 linearToSrgb(vec3 color) {
-	color = max(color, vec3(0.0));
-	vec3 lower = color * 12.92;
-	vec3 higher = 1.055 * pow(color, vec3(1.0 / 2.4)) - 0.055;
-	return mix(higher, lower, lessThanEqual(color, vec3(0.0031308)));
-}
-
-vec3 mixPaletteLinear(int fromIdx, int toIdx, float t) {
-	return mix(srgbToLinear(u_colors[fromIdx]), srgbToLinear(u_colors[toIdx]), t);
-}
-
-vec3 getPaletteColor(vec4 metric) {
-	float colorIdx = metric.x * u_colorScale + metric.y + u_paletteFrame;
-	float wrappedIdx = mod(floor(colorIdx), float(N_COLORS));
-	float t = fract(colorIdx);
-	int fromIdx = int(wrappedIdx);
-	int toIdx = (fromIdx + 1) % N_COLORS;
-
-	vec3 outsideColor = mixPaletteLinear(fromIdx, toIdx, t) * metric.z;
-	vec3 insideColor = mixPaletteLinear(0, 1, 0.5) * 0.18;
-	return linearToSrgb(clamp(mix(insideColor, outsideColor, metric.w), 0.0, 1.0));
 }
 
 bool inMandelbrotInterior(vec2 c) {
@@ -242,14 +220,12 @@ vec4 iterateJulia(vec2 coord, vec2 c, float pixelRadius) {
 			);
 		}
 	}
-	return buildMetric(float(u_iterations), detailTotal, stripeTotal, lastStripeValue, detailSamples, 0.0, 0.0, 1.0);
+	return interiorMetric();
 }
 
 vec4 iterateMandelbrot(vec2 coord, float pixelRadius) {
-	// Skip the cardioid/period-2 bulb early-out when stripe averaging is on; the orbit
-	// is needed to compute the addend.
-	if (u_exponent == 2 && u_stripeAverage != 1 && inMandelbrotInterior(coord)) {
-		return buildMetric(float(u_iterations), 0.0, 0.0, 0.5, 0, 0.0, 0.0, 1.0);
+	if (u_exponent == 2 && inMandelbrotInterior(coord)) {
+		return interiorMetric();
 	}
 	vec2 z = vec2(0.0);
 	vec2 dz = vec2(0.0);
@@ -297,7 +273,7 @@ vec4 iterateMandelbrot(vec2 coord, float pixelRadius) {
 			);
 		}
 	}
-	return buildMetric(float(u_iterations), detailTotal, stripeTotal, lastStripeValue, detailSamples, 0.0, 0.0, 1.0);
+	return interiorMetric();
 }
 
 vec4 iterateBurningShip(vec2 coord) {
@@ -328,7 +304,7 @@ vec4 iterateBurningShip(vec2 coord) {
 			);
 		}
 	}
-	return buildMetric(float(u_iterations), detailTotal, stripeTotal, lastStripeValue, detailSamples, 0.0, 0.0, 1.0);
+	return interiorMetric();
 }
 
 vec4 iterateMandala(vec2 coord, vec2 c) {
@@ -358,7 +334,7 @@ vec4 iterateMandala(vec2 coord, vec2 c) {
 			);
 		}
 	}
-	return buildMetric(float(u_iterations), detailTotal, stripeTotal, lastStripeValue, detailSamples, 0.0, 0.0, 1.0);
+	return interiorMetric();
 }
 
 void main() {
@@ -368,7 +344,7 @@ void main() {
 
 	vec2 centeredCoords = (normalizedCoords / u_zoom + u_center) * 2.0;
 
-	vec4 metric = vec4(float(u_iterations), 0.0, 1.0, 0.0);
+	vec4 metric = vec4(0.0, 0.0, 1.0, 0.0);
 	switch (u_fractalType) {
 		case 0:
 			metric = iterateJulia(centeredCoords, vec2(u_cReal, u_cImaginary), pixelRadius);
@@ -384,5 +360,5 @@ void main() {
 			break;
 	}
 
-	FragColor = vec4(getPaletteColor(metric), 1.0);
+	FragColor = metric;
 }

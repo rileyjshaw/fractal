@@ -10,6 +10,7 @@ import handleTouch from './touch.js';
 import { DeepZoomManager } from './deepZoom.js';
 import { generateDeepDisplayShader } from './deepDisplayShader.js';
 import { generatePerturbationShader } from './perturbationShader.js';
+import * as profiler from './profiler.js';
 
 // Auto-update the service worker.
 registerSW({ immediate: true });
@@ -42,41 +43,44 @@ const SLOPE_LIGHT_INTENSITY_STEP = 0.05;
 const MIN_SPEED = 0.1;
 const MAX_SPEED = 8;
 const BASE_ITERATIONS = 256;
-const DEEP_MIN_ITERATIONS = 2048;
+// Floor for the deep iteration budget. Picked high enough that the iteration
+// range gives palette cycling room (low values cluster everything near the
+// cap and the color range collapses). Per-frame shader cost is offset by the
+// palette-texture optimization moving display:draw from ~5ms to <1ms.
+const DEEP_MIN_ITERATIONS = 8192;
 const DEEP_MAX_ITERATIONS = 65536;
-const DEEP_ITERATION_ZOOM_FACTOR = 192;
-const DEEP_ITERATION_QUANTUM = 256;
+const DEEP_ITERATION_ZOOM_FACTOR = 384;
 const DEEP_COMPATIBLE_REFERENCE_MAX_OFFSET = 2.5;
-const DEEP_REFERENCE_RECENTER_OFFSET = 0.75;
+// Threshold past which we recompute a closer reference. Pushed up against
+// DEEP_COMPATIBLE_REFERENCE_MAX_OFFSET so a single reference stays in use much
+// longer before a forced recompute. Each recompute is a visible jump (the
+// reference center may shift via findGoodReferenceCenter, every pixel sees a
+// different per-pixel perturbation result), so trading some perturbation
+// accuracy at large offsets for fewer jumps reads as much smoother.
+const DEEP_REFERENCE_RECENTER_OFFSET = 2.0;
 // Start computing the deep reference orbit this many zoom units before crossing the
 // deep-zoom threshold so the orbit is ready by the time the user actually needs it.
 const DEEP_ZOOM_PREPARATION_MARGIN_EXPONENT = 3;
-// When the orbit is computed (whether preemptively or on demand), target an
-// iteration count covering a few more zoom units of headroom, so subsequent
-// zooming-in doesn't immediately trigger another recompute and stall.
-const DEEP_REFERENCE_ITERATION_HEADROOM_EXPONENT = 4;
-// During interactive deep-zoom motion we render the iteration pass at reduced
-// resolution to keep frame rate up. The drop is scaled by iteration budget so
-// shallow deep zooms (where the GPU keeps up at full res) don't take a hit
-// and only the deeper zooms — where the iteration shader is the bottleneck —
-// trade pixels for frame rate. After this debounce we resize the canvas back
-// to the user's preferred density and a fresh iteration pass refreshes the
-// metric at full resolution.
-//
-// The previous strategy reprojected the last fully-iterated frame in the
-// display shader during motion. It looked sharp at shallow deep zooms but
-// stretched arbitrarily at Z>=130 once the iteration budget hit the cap and
-// motion just kept magnifying the same stale frame. Resolution scaling stays
-// consistent across all zoom levels.
+// Reference orbit is computed with iterations sufficient for this many zoom units
+// of headroom past the current zoom. With u_iterations now continuous and
+// DEEP_REFERENCE_ITERATION_QUANTUM keeping the recompute trigger from firing every
+// zoom unit, ~12 zoom units of headroom is enough to avoid visible recompute jumps
+// during normal zooming while keeping reference-orbit GMP work bounded.
+const DEEP_REFERENCE_ITERATION_HEADROOM_EXPONENT = 12;
+// Coarse quantum applied to the reference-orbit iteration count so the trigger
+// (stored < target) doesn't fire every zoom unit. Sized to cover several zoom
+// units of u_iterations growth per recompute.
+const DEEP_REFERENCE_ITERATION_QUANTUM = 4096;
+// Series-approximation warm start has unresolved validity-region artifacts and
+// zoom-dependent stripe/color shifts. Off until those are fixed.
+const ENABLE_DEEP_SERIES_APPROXIMATION = false;
 const DEEP_INTERACTION_MOTION_SETTLE_MS = 200;
-// Iteration budget below which motion stays at full resolution. Picked so
-// canvas resizing during motion only kicks in once the iteration cost is
-// meaningful (a few zoom units past the deep-zoom threshold).
-const DEEP_INTERACTION_MOTION_FULL_RES_ITERATIONS = 4096;
-// Hard floor for the motion resolution multiplier. Cost scales linearly with
-// pixel count, so 1/3 linear is ~9x cheaper than full res.
-const DEEP_INTERACTION_MOTION_MIN_FACTOR = 1 / 3;
+// Absolute pixel density (CSS-pixel multiplier) used while the user is interacting.
+// Half of non-retina resolution — quartering the linear density on a 2x retina, so
+// the iteration shader does ~16x less work per frame during zoom/pan.
+const INTERACTION_MOTION_RESOLUTION_MULTIPLIER = 0.5;
 const URL_CENTER_GUARD_DECIMAL_DIGITS = 6;
+const SHOW_ZOOM_MODE_NOTICES = import.meta.env.DEV;
 
 const ORBIT_TEXTURE_OPTIONS = {
 	internalFormat: 'RGBA32F',
@@ -100,6 +104,22 @@ const METRIC_TEXTURE_OPTIONS = {
 	preserveY: false,
 };
 
+// 1D palette texture sampled by the display shader. RGBA8 is universally
+// filterable with LINEAR (RGBA32F isn't, without OES_texture_float_linear), so
+// the GPU handles smooth interpolation between palette entries for free.
+// REPEAT wrap makes the palette cycle seamlessly. 8-bit precision is plenty
+// for palette colors at display resolution.
+const PALETTE_TEXTURE_OPTIONS = {
+	internalFormat: 'RGBA8',
+	format: 'RGBA',
+	type: 'UNSIGNED_BYTE',
+	minFilter: 'LINEAR',
+	magFilter: 'LINEAR',
+	wrapS: 'REPEAT',
+	wrapT: 'CLAMP_TO_EDGE',
+	preserveY: false,
+};
+
 const FRACTAL_TYPES = ['Julia', 'Mandelbrot', 'Burning Ship', 'Mandala'];
 
 const MIN_ZOOM_EXPONENT = Math.log(MIN_ZOOM) / Math.log(2);
@@ -108,21 +128,21 @@ const STANDARD_RENDER_SAFE_ZOOM_EXPONENT = Math.log(STANDARD_RENDER_SAFE_MAX_ZOO
 
 const deepZoomManager = new DeepZoomManager({ threshold: DEEP_ZOOM_THRESHOLD });
 
-let resolutionMultiplier = 1;
-let standardRenderer = null;
+let resolutionMultiplier = window.devicePixelRatio || 1;
+let standardIterationRenderer = null;
 let deepIterationRenderer = null;
-let deepDisplayRenderer = null;
+let displayRenderer = null;
+let lastStandardIterationRenderSignature = null;
 let lastUploadedDeepOrbitSignature = null;
 let lastDeepIterationRenderSignature = null;
 let lastUnsupportedDeepZoomReason = null;
 let lastDeepZoomActive = false;
-let activeRenderer = null;
 let isDeepInteractionInMotion = false;
 let colorsVersion = 0;
-let standardRendererColorsVersion = -1;
-let deepDisplayRendererColorsVersion = -1;
-let cachedColorUniformValue = null;
-let cachedColorUniformVersion = -1;
+let displayRendererColorsVersion = -1;
+let paletteFrame = 0;
+let lastPaletteUpdateMs = null;
+const PALETTE_SECONDS_PER_BAND = 0.3125;
 
 tinykeys(window, {
 	KeyC: () => updateColors(1),
@@ -283,9 +303,13 @@ tinykeys(window, {
 	'Shift+?': () => {
 		instructionsContainer.classList.toggle('show');
 	},
+	KeyP: () => {
+		const enabled = profiler.toggle();
+		showInfo(enabled ? 'Profiler on' : 'Profiler off');
+	},
 	Enter: () => {
-		if (!activeRenderer) return;
-		save(activeRenderer, 'fractal.png', null, { preventShare: true });
+		if (!displayRenderer) return;
+		save(displayRenderer, 'fractal.png', null, { preventShare: true });
 	},
 	Escape: () => {
 		instructionsContainer.classList.remove('show');
@@ -458,9 +482,7 @@ function setApproximateCenterState(xPosition, yPosition, { syncSmoothed = false,
 		smoothedPosition[0] = xPosition;
 		smoothedPosition[1] = yPosition;
 	}
-	if (didChangeCenter && isDeepInteractionMotionWanted()) {
-		beginDeepInteractionMotion();
-	}
+	if (didChangeCenter) beginDeepInteractionMotion();
 	if (persist) persistStateToHash();
 }
 
@@ -469,9 +491,7 @@ function setPreciseCenterState(centerReal, centerImag, { syncSmoothed = false, p
 	state.deepCenterReal = centerReal;
 	state.deepCenterImag = centerImag;
 	syncApproximateCenterFromPreciseState({ syncSmoothed });
-	if (didChangeCenter && isDeepInteractionMotionWanted()) {
-		beginDeepInteractionMotion();
-	}
+	if (didChangeCenter) beginDeepInteractionMotion();
 	if (persist) persistStateToHash();
 }
 
@@ -486,9 +506,7 @@ function setZoomState(zoom, { syncSmoothed = true, persist = true } = {}) {
 	if (syncSmoothed) {
 		smoothedZoom[0] = zoom;
 	}
-	if (didChangeZoom && isDeepInteractionMotionWanted(zoom)) {
-		beginDeepInteractionMotion();
-	}
+	if (didChangeZoom) beginDeepInteractionMotion();
 	if (persist) persistStateToHash();
 }
 
@@ -532,8 +550,11 @@ function resetState() {
 	smoothedPosition[1] = state.yPosition;
 	smoothedZoom[0] = state.zoom;
 	paletteIdx = 0;
+	paletteFrame = 0;
+	lastPaletteUpdateMs = null;
 	updateColors(0);
 	deepZoomManager.invalidate('reset');
+	lastStandardIterationRenderSignature = null;
 	lastDeepIterationRenderSignature = null;
 	lastUploadedDeepOrbitSignature = null;
 	lastObservedZoom = smoothedZoom[0];
@@ -683,20 +704,39 @@ function showInfo(text) {
 }
 
 const canvas = createFullscreenCanvas(document.getElementById('canvas-container'));
+// Hand the canvas to the profiler (not the GL context — see note in profiler.js).
+profiler.setCanvas(canvas);
 
 const colors = new Float32Array(N_COLORS * 3);
-function getColorUniformValue() {
-	if (cachedColorUniformVersion === colorsVersion && cachedColorUniformValue) {
-		return cachedColorUniformValue;
-	}
-	const uniformValue = new Array(N_COLORS);
+
+// Pack the current palette into an RGBA8 1D texture in sRGB-space directly.
+// The shader samples (with LINEAR filter for free interpolation) and outputs
+// straight to the canvas — no srgbToLinear/linearToSrgb round-trip. Mixing in
+// sRGB is slightly less colorimetrically correct than linear-space mixing but
+// the difference is imperceptible for fractal palette cycling AND it removes
+// 3 pow() calls per pixel from the display shader.
+function buildPaletteTextureSource() {
+	const data = new Uint8Array(N_COLORS * 4);
 	for (let i = 0; i < N_COLORS; i++) {
-		const offset = i * 3;
-		uniformValue[i] = [colors[offset], colors[offset + 1], colors[offset + 2]];
+		const src = i * 3;
+		const dst = i * 4;
+		data[dst] = Math.round(colors[src] * 255);
+		data[dst + 1] = Math.round(colors[src + 1] * 255);
+		data[dst + 2] = Math.round(colors[src + 2] * 255);
+		data[dst + 3] = 255;
 	}
-	cachedColorUniformValue = uniformValue;
-	cachedColorUniformVersion = colorsVersion;
-	return uniformValue;
+	return { data, width: N_COLORS, height: 1 };
+}
+
+// Inside color (used when metric.w is low): 50/50 mix of palette[0] and
+// palette[1] at 18% brightness, computed in sRGB space.
+function getInsideColor() {
+	const INSIDE_BRIGHTNESS = 0.18;
+	return [
+		(colors[0] + colors[3]) * 0.5 * INSIDE_BRIGHTNESS,
+		(colors[1] + colors[4]) * 0.5 * INSIDE_BRIGHTNESS,
+		(colors[2] + colors[5]) * 0.5 * INSIDE_BRIGHTNESS,
+	];
 }
 
 function updateColors(direction = 0) {
@@ -722,29 +762,25 @@ function updateColors(direction = 0) {
 	document.documentElement.style.backgroundColor = palette[0];
 }
 
-// At effective speed = 1 the palette advances by one band roughly every 312ms (a full
-// 32-color cycle takes ~10s). Tuned to feel like a slow, ambient drift at the default.
-const ANIMATION_MS_PER_PALETTE_BAND = 312.5;
-// The user-facing speed value is linear in [MIN_SPEED, MAX_SPEED] with default 1, but it
-// gets squared before driving the animation. That keeps the UI value intuitive while
-// giving a much wider effective range (0..64 with the current bounds) and finer control
-// near the default — a 0.1 nudge at speed 1 changes the rate by ~20%, while the same
-// nudge at speed 6 changes it by ~3%. Direction stays on animationDirection so the
-// squared mapping doesn't have to preserve sign.
-function getAnimationFrameOffset(time) {
-	if (!state.isPlaying) return 0;
-	const effectiveSpeed = state.speed * state.speed;
-	return (
-		(colors.length + (time * state.animationDirection * effectiveSpeed) / ANIMATION_MS_PER_PALETTE_BAND) %
-		colors.length
-	);
-}
-
 function getShaderPadOptions(options = {}) {
 	return {
 		canvas,
 		...options,
 	};
+}
+
+function advancePaletteFrame(nowMs) {
+	if (lastPaletteUpdateMs !== null && state.isPlaying) {
+		const effectiveSpeed = state.speed * state.speed;
+		paletteFrame +=
+			((nowMs - lastPaletteUpdateMs) / 1000 / PALETTE_SECONDS_PER_BAND) *
+			state.animationDirection *
+			effectiveSpeed;
+		// Wrap so paletteFrame stays bounded. Unbounded growth loses float32 precision
+		// against u_colorScale * smoothIters and the palette can stop visibly advancing.
+		paletteFrame -= Math.floor(paletteFrame / N_COLORS) * N_COLORS;
+	}
+	lastPaletteUpdateMs = nowMs;
 }
 
 function getCanvasDisplaySize() {
@@ -755,34 +791,32 @@ function getCanvasDisplaySize() {
 	};
 }
 
-function getDeepInteractionMotionResolutionFactor() {
-	// Iteration cost scales linearly with pixel count, so to hold the cost
-	// constant as the iteration budget grows, the pixel count needs to shrink
-	// at the same rate (i.e. the linear resolution factor scales as
-	// sqrt(reference / current)). Clamped to [MIN_FACTOR, 1] so it doesn't
-	// upsample below the budget threshold or drop further than 1/3 at depth.
-	const currentIterations = getIterationBudget(smoothedZoom[0]);
-	if (currentIterations <= DEEP_INTERACTION_MOTION_FULL_RES_ITERATIONS) return 1;
-	const factor = Math.sqrt(DEEP_INTERACTION_MOTION_FULL_RES_ITERATIONS / currentIterations);
-	return Math.max(DEEP_INTERACTION_MOTION_MIN_FACTOR, factor);
-}
-
-function getEffectiveResolutionMultiplier() {
-	if (!isDeepInteractionInMotion) return resolutionMultiplier;
-	const motionFactor = getDeepInteractionMotionResolutionFactor();
-	if (motionFactor >= 1) return resolutionMultiplier;
-	return Math.max(MIN_RESOLUTION_MULTIPLIER, resolutionMultiplier * motionFactor);
-}
-
 function syncCanvasResolution() {
 	const displaySize = getCanvasDisplaySize();
-	const effectiveMultiplier = getEffectiveResolutionMultiplier();
+	// Drop resolution during deep-zoom motion only — the perturbation shader is
+	// the bottleneck there. Standard mode is GPU-cheap (especially with the
+	// chained iteration/display split below) and doesn't need the trade.
+	const shouldDropForMotion = isDeepInteractionInMotion && isDeepZoomRequested(smoothedZoom[0]);
+	const effectiveMultiplier = shouldDropForMotion
+		? Math.max(MIN_RESOLUTION_MULTIPLIER, Math.min(resolutionMultiplier, INTERACTION_MOTION_RESOLUTION_MULTIPLIER))
+		: resolutionMultiplier;
 	const width = Math.max(1, Math.round(displaySize.width * effectiveMultiplier));
 	const height = Math.max(1, Math.round(displaySize.height * effectiveMultiplier));
 	if (canvas.width === width && canvas.height === height) return;
 
 	canvas.width = width;
 	canvas.height = height;
+
+	// shaderpad's MutationObserver-based texture resize fires after the current
+	// task, leaving u_liveMetrics bound to a deleted texture and the canvas black
+	// until the next signature change. Sync now and rebind the sampler.
+	standardIterationRenderer?.syncRes();
+	deepIterationRenderer?.syncRes();
+	displayRenderer?.syncRes();
+	// Force the next frame to re-run the iteration pass so the display sampler
+	// rebinds against the freshly recreated metric FBO.
+	lastStandardIterationRenderSignature = null;
+	lastDeepIterationRenderSignature = null;
 }
 
 function setDeepInteractionInMotion(isActive) {
@@ -800,19 +834,10 @@ function beginDeepInteractionMotion() {
 	settleDeepInteractionMotion();
 }
 
-function isDeepInteractionMotionWanted(zoom = smoothedZoom[0]) {
-	return (
-		deepZoomManager.supportsState(state).supported &&
-		(isDeepZoomRequested(zoom) || isDeepZoomRequested(smoothedZoom[0]))
-	);
-}
-
 function updateDeepInteractionMotion() {
 	if (Math.abs(smoothedZoom[0] - lastObservedZoom) <= 1e-9) return;
 	lastObservedZoom = smoothedZoom[0];
-	if (isDeepInteractionMotionWanted()) {
-		beginDeepInteractionMotion();
-	}
+	beginDeepInteractionMotion();
 }
 
 function setResolutionMultiplier(nextResolutionMultiplier) {
@@ -855,35 +880,34 @@ function updateSlopeLightIntensity(delta) {
 	showInfo(`Light intensity: ${slopeLightIntensity.toFixed(2)}`);
 }
 
-function initializeStandardRendererUniforms(renderState) {
-	standardRenderer.initializeUniform('u_center', 'float', [renderState.xPosition, renderState.yPosition]);
-	standardRenderer.initializeUniform('u_zoom', 'float', renderState.zoomScale);
-	standardRenderer.initializeUniform('u_fractalType', 'int', renderState.fractalType);
-	standardRenderer.initializeUniform('u_exponent', 'int', renderState.exponent);
-	standardRenderer.initializeUniform('u_cReal', 'float', renderState.cReal);
-	standardRenderer.initializeUniform('u_cImaginary', 'float', renderState.cImaginary);
-	standardRenderer.initializeUniform('u_colors', 'float', getColorUniformValue(), { arrayLength: N_COLORS });
-	standardRenderer.initializeUniform('u_escapeRadius', 'float', renderState.escapeRadius);
-	standardRenderer.initializeUniform('u_logEscapeRadius', 'float', renderState.logEscapeRadius);
-	standardRenderer.initializeUniform('u_colorScale', 'float', renderState.colorScale);
-	standardRenderer.initializeUniform('u_paletteFrame', 'float', renderState.paletteFrame);
-	standardRenderer.initializeUniform('u_iterations', 'int', renderState.iterations);
-	standardRenderer.initializeUniform('u_slopeShading', 'int', renderState.slopeShading);
-	standardRenderer.initializeUniform('u_slopeLightDir', 'float', renderState.slopeLightDir);
-	standardRenderer.initializeUniform('u_slopeLightHeight', 'float', renderState.slopeLightHeight);
-	standardRenderer.initializeUniform('u_slopeLightIntensity', 'float', renderState.slopeLightIntensity);
-	standardRenderer.initializeUniform('u_stripeAverage', 'int', renderState.stripeAverage);
+function initializeStandardIterationUniforms(renderState) {
+	standardIterationRenderer.initializeUniform('u_center', 'float', [renderState.xPosition, renderState.yPosition]);
+	standardIterationRenderer.initializeUniform('u_zoom', 'float', renderState.zoomScale);
+	standardIterationRenderer.initializeUniform('u_fractalType', 'int', renderState.fractalType);
+	standardIterationRenderer.initializeUniform('u_exponent', 'int', renderState.exponent);
+	standardIterationRenderer.initializeUniform('u_cReal', 'float', renderState.cReal);
+	standardIterationRenderer.initializeUniform('u_cImaginary', 'float', renderState.cImaginary);
+	standardIterationRenderer.initializeUniform('u_escapeRadius', 'float', renderState.escapeRadius);
+	standardIterationRenderer.initializeUniform('u_logEscapeRadius', 'float', renderState.logEscapeRadius);
+	standardIterationRenderer.initializeUniform('u_iterations', 'int', renderState.iterations);
+	standardIterationRenderer.initializeUniform('u_slopeShading', 'int', renderState.slopeShading);
+	standardIterationRenderer.initializeUniform('u_slopeLightDir', 'float', renderState.slopeLightDir);
+	standardIterationRenderer.initializeUniform('u_slopeLightHeight', 'float', renderState.slopeLightHeight);
+	standardIterationRenderer.initializeUniform('u_slopeLightIntensity', 'float', renderState.slopeLightIntensity);
+	standardIterationRenderer.initializeUniform('u_stripeAverage', 'int', renderState.stripeAverage);
 }
 
-function ensureStandardRenderer(renderState) {
-	if (standardRenderer) return;
-	standardRenderer = new ShaderPad(fragmentSource, getShaderPadOptions());
-	initializeStandardRendererUniforms(renderState);
-	standardRendererColorsVersion = colorsVersion;
+function ensureStandardIterationRenderer(renderState) {
+	if (standardIterationRenderer) return;
+	standardIterationRenderer = new ShaderPad(fragmentSource, {
+		...getShaderPadOptions(),
+		...METRIC_TEXTURE_OPTIONS,
+	});
+	initializeStandardIterationUniforms(renderState);
 }
 
-function updateStandardRendererUniforms(renderState) {
-	const uniformUpdates = {
+function updateStandardIterationUniforms(renderState) {
+	standardIterationRenderer.updateUniforms({
 		u_center: [renderState.xPosition, renderState.yPosition],
 		u_zoom: renderState.zoomScale,
 		u_fractalType: renderState.fractalType,
@@ -892,22 +916,13 @@ function updateStandardRendererUniforms(renderState) {
 		u_cImaginary: renderState.cImaginary,
 		u_escapeRadius: renderState.escapeRadius,
 		u_logEscapeRadius: renderState.logEscapeRadius,
-		u_colorScale: renderState.colorScale,
-		u_paletteFrame: renderState.paletteFrame,
 		u_iterations: renderState.iterations,
 		u_slopeShading: renderState.slopeShading,
 		u_slopeLightDir: renderState.slopeLightDir,
 		u_slopeLightHeight: renderState.slopeLightHeight,
 		u_slopeLightIntensity: renderState.slopeLightIntensity,
 		u_stripeAverage: renderState.stripeAverage,
-	};
-
-	if (standardRendererColorsVersion !== colorsVersion) {
-		uniformUpdates.u_colors = getColorUniformValue();
-		standardRendererColorsVersion = colorsVersion;
-	}
-
-	standardRenderer.updateUniforms(uniformUpdates);
+	});
 }
 
 function decomposeRadiusExact(radiusExact, fallbackRadius) {
@@ -969,22 +984,25 @@ function shouldRecenterDeepReference(renderState) {
 	return !Number.isFinite(maxOffset) || maxOffset > DEEP_REFERENCE_RECENTER_OFFSET;
 }
 
-function getIterationBudget(zoom) {
-	// One shared budget for both renderers. A discontinuous jump at the deep
-	// threshold (256 → 2048+) would flip every slow-escape pixel from "in-set"
-	// (rendered dark) to "escaped" (rendered with the palette) right at the
-	// boundary, so we ramp continuously from BASE_ITERATIONS up to
-	// DEEP_MIN_ITERATIONS as zoom approaches DEEP_ZOOM_THRESHOLD, then keep
-	// growing with the existing per-zoom-level factor beyond the threshold.
-	const depthFromBase = Math.max(0, zoom - MIN_ZOOM_EXPONENT);
-	const depthFromThreshold = Math.max(0, zoom - DEEP_ZOOM_THRESHOLD);
-	const preThresholdSpan = Math.max(1e-9, DEEP_ZOOM_THRESHOLD - MIN_ZOOM_EXPONENT);
-	const preThresholdRatio = Math.min(1, depthFromBase / preThresholdSpan);
-	const preThresholdBudget = BASE_ITERATIONS + preThresholdRatio * (DEEP_MIN_ITERATIONS - BASE_ITERATIONS);
-	const postThresholdBudget = depthFromThreshold * DEEP_ITERATION_ZOOM_FACTOR;
-	const target = preThresholdBudget + postThresholdBudget;
-	const quantized = Math.ceil(target / DEEP_ITERATION_QUANTUM) * DEEP_ITERATION_QUANTUM;
-	return Math.min(DEEP_MAX_ITERATIONS, Math.max(BASE_ITERATIONS, quantized));
+function getStandardIterationBudget(zoom) {
+	// Constant within the standard zoom range so pixels don't suddenly escape as the
+	// user zooms in. For fractals deep mode doesn't support, grow with zoom past the
+	// deep threshold (deep mode never kicks in for those).
+	if (zoom <= DEEP_ZOOM_THRESHOLD) return BASE_ITERATIONS;
+	const target = Math.ceil(BASE_ITERATIONS + (zoom - DEEP_ZOOM_THRESHOLD) * DEEP_ITERATION_ZOOM_FACTOR);
+	return Math.min(DEEP_MAX_ITERATIONS, target);
+}
+
+function getDeepIterationBudget(zoom) {
+	// Continuous so per-frame iter growth shows as 0-1 newly-escaping pixels at most,
+	// not as a 256-step jump that fills a band of pixels at once. The reference orbit
+	// is sized with DEEP_REFERENCE_ITERATION_HEADROOM_EXPONENT extra zoom units worth
+	// of iterations on top of this, so orbit recomputes don't fire as u_iterations
+	// ticks up — only when the user pans or radically shifts zoom.
+	const target = Math.ceil(
+		DEEP_MIN_ITERATIONS + Math.max(0, zoom - DEEP_ZOOM_THRESHOLD) * DEEP_ITERATION_ZOOM_FACTOR,
+	);
+	return Math.min(DEEP_MAX_ITERATIONS, Math.max(DEEP_MIN_ITERATIONS, target));
 }
 
 function initializeDeepIterationUniforms(renderState) {
@@ -1047,11 +1065,13 @@ function syncDeepOrbitTexture() {
 
 	if (lastUploadedDeepOrbitSignature === deepZoomManager.referenceSignature) return;
 
-	if (lastUploadedDeepOrbitSignature === null) {
-		deepIterationRenderer.initializeTexture('u_orbitTexture', orbitTextureSource, ORBIT_TEXTURE_OPTIONS);
-	} else {
-		deepIterationRenderer.updateTextures({ u_orbitTexture: orbitTextureSource });
-	}
+	profiler.measure('deep:uploadOrbit', () => {
+		if (lastUploadedDeepOrbitSignature === null) {
+			deepIterationRenderer.initializeTexture('u_orbitTexture', orbitTextureSource, ORBIT_TEXTURE_OPTIONS);
+		} else {
+			deepIterationRenderer.updateTextures({ u_orbitTexture: orbitTextureSource });
+		}
+	});
 
 	lastUploadedDeepOrbitSignature = deepZoomManager.referenceSignature;
 }
@@ -1068,33 +1088,28 @@ function ensureDeepIterationRenderer(renderState) {
 	syncDeepOrbitTexture();
 }
 
-function initializeDeepDisplayUniforms(renderState) {
-	deepDisplayRenderer.initializeUniform('u_colors', 'float', getColorUniformValue(), { arrayLength: N_COLORS });
-	deepDisplayRenderer.initializeUniform('u_paletteFrame', 'float', renderState.paletteFrame);
-	deepDisplayRenderer.initializeUniform('u_colorScale', 'float', renderState.colorScale);
-	deepDisplayRenderer.initializeTexture('u_liveMetrics', deepIterationRenderer);
+function ensureDisplayRenderer(renderState, iterationRenderer) {
+	if (displayRenderer) return;
+	displayRenderer = new ShaderPad(generateDeepDisplayShader(), getShaderPadOptions());
+	displayRenderer.initializeUniform('u_insideColor', 'float', getInsideColor());
+	displayRenderer.initializeUniform('u_paletteFrame', 'float', renderState.paletteFrame);
+	displayRenderer.initializeUniform('u_colorScale', 'float', renderState.colorScale);
+	displayRenderer.initializeTexture('u_palette', buildPaletteTextureSource(), PALETTE_TEXTURE_OPTIONS);
+	displayRenderer.initializeTexture('u_liveMetrics', iterationRenderer);
+	displayRendererColorsVersion = colorsVersion;
 }
 
-function ensureDeepDisplayRenderer(renderState) {
-	if (deepDisplayRenderer) return;
-	ensureDeepIterationRenderer(renderState);
-	deepDisplayRenderer = new ShaderPad(generateDeepDisplayShader(), getShaderPadOptions());
-	initializeDeepDisplayUniforms(renderState);
-	deepDisplayRendererColorsVersion = colorsVersion;
-}
-
-function updateDeepDisplayUniforms(renderState) {
-	const uniformUpdates = {
+function updateDisplayUniforms(renderState) {
+	displayRenderer.updateUniforms({
 		u_paletteFrame: renderState.paletteFrame,
 		u_colorScale: renderState.colorScale,
-	};
+	});
 
-	if (deepDisplayRendererColorsVersion !== colorsVersion) {
-		uniformUpdates.u_colors = getColorUniformValue();
-		deepDisplayRendererColorsVersion = colorsVersion;
+	if (displayRendererColorsVersion !== colorsVersion) {
+		displayRenderer.updateTextures({ u_palette: buildPaletteTextureSource() });
+		displayRenderer.updateUniforms({ u_insideColor: getInsideColor() });
+		displayRendererColorsVersion = colorsVersion;
 	}
-
-	deepDisplayRenderer.updateUniforms(uniformUpdates);
 }
 
 function initializeDeepZoom() {
@@ -1108,7 +1123,7 @@ function isDeepZoomRequested(zoom) {
 	return zoom > STANDARD_RENDER_SAFE_ZOOM_EXPONENT || deepZoomManager.shouldUseDeepZoom(zoom);
 }
 
-function getRenderState(time) {
+function getRenderState() {
 	const zoomScale = getApproximateZoomScale(smoothedZoom[0]);
 	const centerRealExact = state.deepCenterReal;
 	const centerImagExact = state.deepCenterImag;
@@ -1117,7 +1132,8 @@ function getRenderState(time) {
 	const approximateCenterImag = Number(centerImagExact);
 	const approximateRadius = Number(radiusExact);
 	const fallbackRadius = Math.pow(2, 1 - smoothedZoom[0]);
-	const fullIterations = getIterationBudget(smoothedZoom[0]);
+	const standardIterations = getStandardIterationBudget(smoothedZoom[0]);
+	const deepIterations = getDeepIterationBudget(smoothedZoom[0]);
 	const slopeLightAngle = Number.isFinite(state.slopeLightAngle)
 		? state.slopeLightAngle
 		: defaultState.slopeLightAngle;
@@ -1126,10 +1142,6 @@ function getRenderState(time) {
 		MIN_SLOPE_LIGHT_INTENSITY,
 		Math.min(MAX_SLOPE_LIGHT_INTENSITY, state.slopeLightIntensity),
 	);
-	// Iterations are not capped during interaction; instead the canvas is resized
-	// down (see getDeepInteractionMotionResolutionFactor / syncCanvasResolution)
-	// so the iteration shader does less per-frame work but stays correct.
-	const iterations = fullIterations;
 	const renderState = {
 		xPosition: smoothedPosition[0],
 		yPosition: smoothedPosition[1],
@@ -1141,14 +1153,13 @@ function getRenderState(time) {
 		zoomScale,
 		radius: Number.isFinite(approximateRadius) && approximateRadius > 0 ? approximateRadius : fallbackRadius,
 		radiusExact,
-		paletteFrame: getAnimationFrameOffset(time),
+		paletteFrame,
 		fractalType: state.fractalType,
 		exponent: state.exponent,
 		cReal: state.cReal,
 		cImaginary: state.cImaginary,
-		iterations,
-		deepIterations: iterations,
-		fullIterations,
+		iterations: standardIterations,
+		deepIterations,
 		escapeRadius: state.escapeRadius,
 		logEscapeRadius: Math.log(state.escapeRadius),
 		colorScale: Math.max(MIN_COLOR_SCALE, Math.min(MAX_COLOR_SCALE, state.colorScale)),
@@ -1157,7 +1168,7 @@ function getRenderState(time) {
 		slopeLightHeight,
 		slopeLightIntensity,
 		stripeAverage: state.stripeAverage,
-		seriesApproximation: 1,
+		seriesApproximation: ENABLE_DEEP_SERIES_APPROXIMATION ? 1 : 0,
 	};
 	return renderState;
 }
@@ -1179,10 +1190,12 @@ function maybeShowDeepZoomModeNotice(requestedDeepZoom, support) {
 	// reference orbit is being computed and would otherwise re-fire this notice.
 	const isDeepActive = requestedDeepZoom && support.supported;
 	if (lastDeepZoomActive === isDeepActive) return;
-	if (isDeepActive) {
-		showInfo('Deep zoom mode enabled');
-	} else if (lastDeepZoomActive) {
-		showInfo('Standard zoom mode');
+	if (SHOW_ZOOM_MODE_NOTICES) {
+		if (isDeepActive) {
+			showInfo('Deep zoom');
+		} else if (lastDeepZoomActive) {
+			showInfo('Standard zoom');
+		}
 	}
 	lastDeepZoomActive = isDeepActive;
 }
@@ -1191,12 +1204,18 @@ function shouldPrepareDeepZoom(zoom) {
 	return zoom > DEEP_ZOOM_THRESHOLD - DEEP_ZOOM_PREPARATION_MARGIN_EXPONENT;
 }
 
-function getReferenceIterationCount(zoom, currentFullIterations) {
-	// Compute the orbit with enough iterations to cover both the threshold crossing
-	// and a few zoom units beyond, so the same orbit can be reused without an
-	// immediate recompute as the user keeps zooming in.
+function getReferenceIterationCount(zoom, currentDeepIterations) {
+	// Round up to a coarse quantum so the trigger comparison in referenceIterationsBelow
+	// (stored < target) doesn't fire every zoom unit. With u_iterations continuous and
+	// the per-zoom-unit target growing by DEEP_ITERATION_ZOOM_FACTOR, a fine-grained
+	// target would force a recompute every frame of zooming, and each recompute is a
+	// visible jump (findGoodReferenceCenter may shift the center, u_referenceOffset
+	// changes, every pixel sees a different reference). The quantum here amortizes
+	// each (expensive) GMP compute across many zoom units of zooming.
 	const headroomZoom = Math.max(zoom, DEEP_ZOOM_THRESHOLD) + DEEP_REFERENCE_ITERATION_HEADROOM_EXPONENT;
-	return Math.max(currentFullIterations, getIterationBudget(headroomZoom));
+	const target = getDeepIterationBudget(headroomZoom);
+	const quantized = Math.ceil(target / DEEP_REFERENCE_ITERATION_QUANTUM) * DEEP_REFERENCE_ITERATION_QUANTUM;
+	return Math.max(currentDeepIterations, quantized);
 }
 
 function ensureDeepZoomPreparation(renderState, requested, support) {
@@ -1210,14 +1229,23 @@ function ensureDeepZoomPreparation(renderState, requested, support) {
 	// Replacing in-flight references during continuous zoom can starve the first deep render.
 	if (deepZoomManager.pendingReferencePromise) return;
 
-	// Always target the full iteration budget for the reference orbit, even if
-	// the per-frame iteration shader runs at reduced resolution during motion.
-	// We want the orbit to be ready for full-quality rendering the moment the
-	// user stops zooming.
-	const referenceIterations = getReferenceIterationCount(renderState.zoom, renderState.fullIterations);
-	const referenceTargetState = { ...renderState, deepIterations: referenceIterations };
+	const referenceIterations = getReferenceIterationCount(renderState.zoom, renderState.deepIterations);
+	const referenceTargetState = {
+		...renderState,
+		// findGoodReferenceCenter accepts samples whose orbit covers requiredIterations
+		// (= what the shader actually runs), then recomputes at deepIterations for headroom.
+		requiredIterations: renderState.deepIterations,
+		deepIterations: referenceIterations,
+	};
 
 	if (!shouldRecenterDeepReference(referenceTargetState)) return;
+
+	// Defer recompute while the user is actively interacting, as long as the existing
+	// reference is still usable. Otherwise the recompute completes mid-motion and the
+	// reference swap is visible as a flash; deferring batches multiple swap triggers
+	// into a single jump at rest. If the existing reference is unusable (no reference,
+	// or offset past MAX), recompute immediately — rendering would otherwise break.
+	if (isDeepInteractionInMotion && canRenderFromCurrentDeepReference(renderState)) return;
 
 	deepZoomManager.ensureReference(referenceTargetState).catch(error => {
 		showError('Failed to compute deep zoom reference');
@@ -1252,31 +1280,35 @@ function getDeepIterationRenderSignature(renderState) {
 	].join('|');
 }
 
-function renderDeepTargetState(targetState) {
-	updateDeepIterationUniforms(targetState);
-	syncDeepOrbitTexture();
-	deepIterationRenderer.step();
-	deepDisplayRenderer.updateTextures({ u_liveMetrics: deepIterationRenderer });
-	lastDeepIterationRenderSignature = getDeepIterationRenderSignature(targetState);
-}
-
-function renderDeepPipeline(renderState) {
-	ensureDeepIterationRenderer(renderState);
-	ensureDeepDisplayRenderer(renderState);
-
-	const targetSignature = getDeepIterationRenderSignature(renderState);
-	if (lastDeepIterationRenderSignature !== targetSignature) {
-		renderDeepTargetState(renderState);
-	}
-
-	updateDeepDisplayUniforms(renderState);
-	deepDisplayRenderer.draw();
+function getStandardIterationRenderSignature(renderState) {
+	return [
+		renderState.xPosition,
+		renderState.yPosition,
+		renderState.zoomScale,
+		renderState.iterations,
+		renderState.fractalType,
+		renderState.exponent,
+		renderState.cReal.toPrecision(12),
+		renderState.cImaginary.toPrecision(12),
+		renderState.escapeRadius.toPrecision(12),
+		renderState.logEscapeRadius.toPrecision(12),
+		renderState.slopeShading,
+		renderState.slopeLightDir.map(value => value.toPrecision(12)).join(','),
+		renderState.slopeLightHeight.toPrecision(12),
+		renderState.slopeLightIntensity.toPrecision(12),
+		renderState.stripeAverage,
+		canvas.width,
+		canvas.height,
+	].join('|');
 }
 
 function render(time) {
-	zoomTween.update(time);
-	updateDeepInteractionMotion();
-	syncCanvasResolution();
+	profiler.measure('frame:advancePalette', () => advancePaletteFrame(time));
+	profiler.measure('frame:tweens+motion', () => {
+		zoomTween.update(time);
+		updateDeepInteractionMotion();
+	});
+	profiler.measure('frame:syncCanvas', () => syncCanvasResolution());
 
 	if (isPreciseNavigationActive(smoothedZoom[0])) {
 		positionTween.stop();
@@ -1286,26 +1318,58 @@ function render(time) {
 		positionTween.update(time);
 	}
 
-	const renderState = getRenderState(time);
+	const renderState = profiler.measure('frame:getRenderState', () => getRenderState());
 	const requestedDeepZoom = isDeepZoomRequested(renderState.zoom);
 	const deepZoomSupport = deepZoomManager.supportsState(state);
-	ensureDeepZoomPreparation(renderState, requestedDeepZoom, deepZoomSupport);
+	profiler.measure('frame:ensureDeepPrep', () => ensureDeepZoomPreparation(renderState, requestedDeepZoom, deepZoomSupport));
 	maybeShowUnsupportedDeepZoomNotice(requestedDeepZoom, deepZoomSupport);
 
 	const canRenderDeep =
 		requestedDeepZoom && deepZoomSupport.supported && canRenderFromCurrentDeepReference(renderState);
+	const deepHasCachedFrame =
+		requestedDeepZoom && deepZoomSupport.supported && deepIterationRenderer && lastDeepIterationRenderSignature;
 
+	// Iteration pass: run only when something iteration-affecting changed.
+	//   1. Deep reference exists → step deep iteration. Short-orbit references
+	//      still produce useful output via the in-shader iteration-extension
+	//      rebase (k >= orbitLength-1 fold), so we don't reject by orbit length.
+	//   2. Deep zoom requested but reference missing / not yet computed → hold
+	//      the last good deep FBO if available, else fall through to standard.
+	//   3. Otherwise → standard renderer.
+	let iterationRenderer;
 	if (canRenderDeep) {
-		renderDeepPipeline(renderState);
-		activeRenderer = deepDisplayRenderer;
+		ensureDeepIterationRenderer(renderState);
+		const signature = getDeepIterationRenderSignature(renderState);
+		if (lastDeepIterationRenderSignature !== signature) {
+			profiler.measure('deep:updateUniforms', () => updateDeepIterationUniforms(renderState));
+			profiler.measure('deep:syncOrbit', () => syncDeepOrbitTexture());
+			profiler.measureGL('deep:iterStep (GPU)', () => deepIterationRenderer.step());
+			lastDeepIterationRenderSignature = signature;
+			profiler.note('deep:u_iterations', renderState.deepIterations);
+		}
+		iterationRenderer = deepIterationRenderer;
+	} else if (deepHasCachedFrame) {
+		iterationRenderer = deepIterationRenderer;
+		profiler.note('deep:holdFrame', 1);
 	} else {
-		ensureStandardRenderer(renderState);
-		updateStandardRendererUniforms(renderState);
-		standardRenderer.draw();
-		activeRenderer = standardRenderer;
+		ensureStandardIterationRenderer(renderState);
+		const signature = getStandardIterationRenderSignature(renderState);
+		if (lastStandardIterationRenderSignature !== signature) {
+			profiler.measure('std:updateUniforms', () => updateStandardIterationUniforms(renderState));
+			profiler.measureGL('std:iterStep (GPU)', () => standardIterationRenderer.step());
+			lastStandardIterationRenderSignature = signature;
+			profiler.note('std:u_iterations', renderState.iterations);
+		}
+		iterationRenderer = standardIterationRenderer;
 	}
 
+	ensureDisplayRenderer(renderState, iterationRenderer);
+	profiler.measure('display:updateTextures', () => displayRenderer.updateTextures({ u_liveMetrics: iterationRenderer }));
+	profiler.measure('display:updateUniforms', () => updateDisplayUniforms(renderState));
+	profiler.measureGL('display:draw (GPU)', () => displayRenderer.draw());
+
 	maybeShowDeepZoomModeNotice(requestedDeepZoom, deepZoomSupport);
+	profiler.tick(time);
 	requestAnimationFrame(render);
 }
 

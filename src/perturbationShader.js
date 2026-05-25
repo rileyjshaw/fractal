@@ -70,6 +70,11 @@ float smoothEscape(int iteration, float magnitude) {
 	return float(iteration) + 1.0 - nu;
 }
 
+// See fractal.frag::interiorMetric.
+vec4 interiorMetric() {
+	return vec4(0.0, 0.0, 1.0, float(u_stripeAverage));
+}
+
 float orbitDetailValue(vec2 z) {
 	return 1.0 / (1.0 + dot(z, z));
 }
@@ -182,7 +187,7 @@ void main() {
 	int j = 0;
 	vec3 orbit0 = getOrbit(0);
 	vec3 orbitCurrent = orbit0;
-	float smoothIters = float(u_iterations);
+	float smoothIters = 0.0;
 	float detailTotal = 0.0;
 	float stripeTotal = 0.0;
 	float lastStripeValue = 0.5;
@@ -294,7 +299,10 @@ void main() {
 
 		float escapeRadius = u_stripeAverage == 1 ? max(u_escapeRadius, STRIPE_AVERAGE_ESCAPE_RADIUS) : u_escapeRadius;
 		if (magnitudeSq > escapeRadius * escapeRadius) {
-			smoothIters = smoothEscape(j, sqrt(magnitudeSq));
+			// j was incremented at the top of the loop body; pass j-1 so this matches
+			// fractal.frag (which passes its pre-increment loop index) and the palette
+			// doesn't shift one band at the standard/deep handoff.
+			smoothIters = smoothEscape(j - 1, sqrt(magnitudeSq));
 			escaped = true;
 			orbitCurrent = orbitNext;
 			break;
@@ -309,10 +317,15 @@ void main() {
 		}
 
 		// Iteration-extension rebase: when the reference orbit runs out, fold the current
-		// full z into a fresh perturbation from orbit[0] = 0. The trigger fires at the
-		// same iteration for every pixel, so it can't produce a per-pixel circular seam
-		// (which a |Z+z| < |z| trigger does).
-		if (k >= orbitLength - 1 && !isJulia) {
+		// full z back into a fresh perturbation from orbit[0]. Mandelbrot's orbit[0] = 0,
+		// Julia's = the reference center; the fold math (dx, dy = fx - orbit0.xy * scale)
+		// generalises to both. With long-orbit references (the normal case after the recent
+		// recompute headroom changes) this never fires. It only fires when the reference
+		// escaped early — in that case Julia would otherwise show a solid view, since
+		// without the fold every still-unescaped pixel returns interiorMetric(). Post-rebase
+		// classifications carry per-pixel artifacts, but a blocky fractal is much more
+		// useful than a flat one.
+		if (k >= orbitLength - 1) {
 			float referenceStartScale = safeExp2(orbit0.z);
 			dx = fx - orbit0.x * referenceStartScale;
 			dy = fy - orbit0.y * referenceStartScale;
@@ -338,7 +351,7 @@ void main() {
 			pixelRadius
 		);
 	} else {
-		FragColor = buildMetric(smoothIters, detailTotal, stripeTotal, lastStripeValue, detailSamples, 0.0, 0.0, 1.0);
+		FragColor = interiorMetric();
 	}
 }
 `;
