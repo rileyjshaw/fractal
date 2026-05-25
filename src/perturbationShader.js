@@ -13,8 +13,18 @@ precision highp float;
 #define DERIVATIVE_RESCALE_TRIGGER_SQ 1.0e30
 #define DERIVATIVE_RESCALE_FACTOR 1.0e-15
 #define DERIVATIVE_RESCALE_LOG 34.538776394910684
+// Must match BLA_CHUNK_SIZE and BLA_TEXTURE_WIDTH in deepZoom.js.
+#define BLA_CHUNK_SIZE 32
+#define BLA_TEXTURE_WIDTH 1024
 
 uniform sampler2D u_orbitTexture;
+// BLA (Bivariate Linear Approximation) table: precomputed per-position
+// composed coefficients (A, B) so the shader can skip BLA_CHUNK_SIZE perturbation
+// iterations in one texture fetch when |dz| is small enough that the dropped
+// dz² term is negligible. Two RGBA32F texels per orbit position:
+//   texel 0: [A.x, A.y, A_scaleExp, validityRsqLog2]
+//   texel 1: [B.x, B.y, B_scaleExp, _unused_]
+uniform sampler2D u_blaTable;
 uniform vec2 u_resolution;
 uniform int u_iterations;
 uniform int u_orbitLength;
@@ -42,6 +52,7 @@ const float STRIPE_AVERAGE_DENSITY = 8.0;
 // One palette wrap per unit of stripe variation; see fractal.frag for rationale.
 const float STRIPE_AVERAGE_COLOR_SCALE = 32.0;
 const float STRIPE_AVERAGE_ESCAPE_RADIUS = 64.0;
+const float LOG_2 = 0.6931471805599453;
 
 float safeExp2(float exponent) {
 	return exp2(clamp(exponent, -126.0, 126.0));
@@ -52,14 +63,50 @@ bool isFiniteFloat(float value) {
 	return value == value && abs(value) < 3.0e38;
 }
 
+float downscaleToExponent(int sourceExponent, int targetExponent) {
+	float shift = float(sourceExponent - targetExponent);
+	if (shift < -126.0) return 0.0;
+	return exp2(min(shift, 126.0));
+}
+
+void normalizePerturbation(inout float x, inout float y, inout int exponent) {
+	float magSq = x * x + y * y;
+	if (!isFiniteFloat(magSq) || magSq <= 0.0) return;
+	float shiftValue = clamp(floor(0.5 * log2(magSq)), -120.0, 120.0);
+	int shift = int(shiftValue);
+	if (shift == 0) return;
+	float scale = exp2(-float(shift));
+	x *= scale;
+	y *= scale;
+	exponent += shift;
+}
+
 vec2 cmul(vec2 a, vec2 b) {
 	return vec2(a.x * b.x - a.y * b.y, a.x * b.y + b.x * a.y);
+}
+
+void rescaleDerivative(inout vec2 derivative, inout float logOffset) {
+	float derivMagSq = dot(derivative, derivative);
+	if (isFiniteFloat(derivMagSq) && derivMagSq > DERIVATIVE_RESCALE_TRIGGER_SQ) {
+		derivative *= DERIVATIVE_RESCALE_FACTOR;
+		logOffset += DERIVATIVE_RESCALE_LOG;
+	}
 }
 
 vec3 getOrbit(int i) {
 	int row = i / ORBIT_TEXTURE_SIZE;
 	int col = i - row * ORBIT_TEXTURE_SIZE;
 	return texelFetch(u_orbitTexture, ivec2(col, row), 0).rgb;
+}
+
+// Returns the two BLA texels for orbit position k. .a member of texel A holds
+// the validity threshold log2(R²); .a of texel B is unused.
+void getBLA(int k, out vec4 entryA, out vec4 entryB) {
+	int texelA = k * 2;
+	int rowA = texelA / BLA_TEXTURE_WIDTH;
+	int colA = texelA - rowA * BLA_TEXTURE_WIDTH;
+	entryA = texelFetch(u_blaTable, ivec2(colA, rowA), 0);
+	entryB = texelFetch(u_blaTable, ivec2(colA + 1, rowA), 0);
 }
 
 float smoothEscape(int iteration, float magnitude) {
@@ -248,28 +295,146 @@ void main() {
 		if (j >= u_iterations || k >= orbitLength - 1) break;
 
 		j += 1;
-		float orbitScalePrev = orbitCurrent.z;
-		float deltaScale = safeExp2(float(cq - q) - orbitScalePrev);
-		float dcx = isJulia ? 0.0 : baseDeltaX * deltaScale;
-		float dcy = isJulia ? 0.0 : baseDeltaY * deltaScale;
-		float previousReferenceScale = safeExp2(orbitScalePrev);
+
+		// BLA opportunity: try to skip BLA_CHUNK_SIZE perturbation iterations in
+		// one texture fetch. Valid when |dz|² is small enough that the dropped
+		// dz² term is negligible (precomputed validity threshold R² stored as
+		// log2 in blaA.w). The chunk's composed A multiplies dz, and B
+		// accumulates the dc contribution over the chunk.
+		// Leave at least one orbit sample for the scalar path so the reference-end
+		// rebase below always gets a chance to run.
+		if (k + BLA_CHUNK_SIZE < orbitLength - 1 && j + BLA_CHUNK_SIZE - 1 <= u_iterations) {
+			vec4 blaA, blaB;
+			getBLA(k, blaA, blaB);
+			float dzMagSq = dx * dx + dy * dy;
+			if (dzMagSq > 0.0) {
+				// |dz|²_absolute = dzMagSq * 2^(2q); R²_log2 is also in absolute terms.
+				float dzLogMagSq = log2(dzMagSq) + 2.0 * float(q);
+				if (dzLogMagSq < blaA.w) {
+					vec2 aMantissa = blaA.xy;
+					int aExp = int(blaA.z);
+
+					// Tentatively compute BLA result; don't commit until post-check
+					// confirms the pixel hasn't escaped within the chunk.
+					float aDx = aMantissa.x * dx - aMantissa.y * dy;
+					float aDy = aMantissa.x * dy + aMantissa.y * dx;
+					int aTermExp = q + aExp;
+					int newQ = aTermExp;
+					float newDx = 0.0;
+					float newDy = 0.0;
+
+					if (!isJulia) {
+						vec2 bMantissa = blaB.xy;
+						int bExp = int(blaB.z);
+						float bDx = bMantissa.x * baseDeltaX - bMantissa.y * baseDeltaY;
+						float bDy = bMantissa.x * baseDeltaY + bMantissa.y * baseDeltaX;
+						int bTermExp = bExp + cq;
+						newQ = max(aTermExp, bTermExp);
+						float aScale = downscaleToExponent(aTermExp, newQ);
+						float bScale = downscaleToExponent(bTermExp, newQ);
+						newDx = aDx * aScale + bDx * bScale;
+						newDy = aDy * aScale + bDy * bScale;
+					} else {
+						newDx = aDx;
+						newDy = aDy;
+					}
+					normalizePerturbation(newDx, newDy, newQ);
+
+					// Post-BLA escape check. The linear approximation breaks when the
+					// pixel truly escapes within the chunk — the dropped dz² term
+					// becomes dominant and BLA's predicted dz_after is wrong. If
+					// |Z + dz_after| at the chunk end exceeds escape, BLA's prediction
+					// is unreliable; fall through to per-iter (correct but slower).
+					// Without this check the wrong |z| feeds smoothEscape() and
+					// produces banded coloring concentric with whatever minibrot the
+					// pixel was near.
+					float newS = safeExp2(float(newQ));
+					vec3 chunkEndOrbit = getOrbit(k + BLA_CHUNK_SIZE);
+					float chunkEndScale = safeExp2(chunkEndOrbit.z);
+					float chunkZx = chunkEndOrbit.x * chunkEndScale + newS * newDx;
+					float chunkZy = chunkEndOrbit.y * chunkEndScale + newS * newDy;
+					float chunkZMagSq = chunkZx * chunkZx + chunkZy * chunkZy;
+					float escapeRadiusCheck = u_stripeAverage == 1 ? max(u_escapeRadius, STRIPE_AVERAGE_ESCAPE_RADIUS) : u_escapeRadius;
+					if (isFiniteFloat(chunkZMagSq) && chunkZMagSq < escapeRadiusCheck * escapeRadiusCheck) {
+						float skippedStripeTotal = 0.0;
+						float skippedLastStripeValue = lastStripeValue;
+						for (int skip = 1; skip <= BLA_CHUNK_SIZE; skip++) {
+							vec3 skippedOrbit = getOrbit(k + skip);
+							float skippedScale = safeExp2(skippedOrbit.z);
+							vec2 skippedZ = skippedOrbit.xy * skippedScale;
+							detailTotal += orbitDetailValue(skippedZ);
+							skippedLastStripeValue = stripeAverageAddend(skippedZ);
+							skippedStripeTotal += skippedLastStripeValue;
+						}
+
+						// Keep visual accumulators continuous across the BLA validity
+						// boundary. The reference samples are a good approximation exactly
+						// where BLA is valid because perturbations are small by definition.
+						stripeTotal += skippedStripeTotal;
+						lastStripeValue = skippedLastStripeValue;
+						detailSamples += BLA_CHUNK_SIZE;
+
+						if (isJulia) {
+							derivative = cmul(aMantissa, derivative);
+							derivativeLogOffset += float(aExp) * LOG_2;
+						} else {
+							vec2 bMantissa = blaB.xy;
+							int bExp = int(blaB.z);
+							vec2 aDerivative = cmul(aMantissa, derivative);
+							float aLogScale = derivativeLogOffset + float(aExp) * LOG_2;
+							float bLogScale = float(bExp) * LOG_2;
+							float commonLogScale = max(aLogScale, bLogScale);
+							float aDerivativeScale = exp(clamp(aLogScale - commonLogScale, -80.0, 0.0));
+							float bDerivativeScale = exp(clamp(bLogScale - commonLogScale, -80.0, 0.0));
+							derivative = aDerivative * aDerivativeScale + bMantissa * bDerivativeScale;
+							derivativeLogOffset = commonLogScale;
+						}
+						rescaleDerivative(derivative, derivativeLogOffset);
+
+						dx = newDx;
+						dy = newDy;
+						q = newQ;
+						S = newS;
+						k += BLA_CHUNK_SIZE;
+						j += BLA_CHUNK_SIZE - 1;
+						orbitCurrent = chunkEndOrbit;
+						continue;
+					}
+				}
+			}
+		}
+
+		int orbitScalePrev = int(orbitCurrent.z);
+		float previousReferenceScale = safeExp2(float(orbitScalePrev));
 		vec2 previousZ = orbitCurrent.xy * previousReferenceScale + S * vec2(dx, dy);
 		derivative = cmul(vec2(2.0 * previousZ.x, 2.0 * previousZ.y), derivative);
 		if (!isJulia) {
 			derivative += vec2(1.0, 0.0);
 		}
-		float derivMagSq = dot(derivative, derivative);
-		if (isFiniteFloat(derivMagSq) && derivMagSq > DERIVATIVE_RESCALE_TRIGGER_SQ) {
-			derivative *= DERIVATIVE_RESCALE_FACTOR;
-			derivativeLogOffset += DERIVATIVE_RESCALE_LOG;
+		rescaleDerivative(derivative, derivativeLogOffset);
+
+		vec2 linearTerm = vec2(
+			2.0 * orbitCurrent.x * dx - 2.0 * orbitCurrent.y * dy,
+			2.0 * orbitCurrent.x * dy + 2.0 * orbitCurrent.y * dx
+		);
+		vec2 squareTerm = vec2(dx * dx - dy * dy, 2.0 * dx * dy);
+		int linearExp = q + orbitScalePrev;
+		int squareExp = q + q;
+		int targetQ = max(linearExp, squareExp);
+		if (!isJulia) {
+			targetQ = max(targetQ, cq);
 		}
-
-		float unS = safeExp2(float(q) - orbitScalePrev);
-		float tx = 2.0 * orbitCurrent.x * dx - 2.0 * orbitCurrent.y * dy + unS * dx * dx - unS * dy * dy + dcx;
-		dy = 2.0 * orbitCurrent.x * dy + 2.0 * orbitCurrent.y * dx + unS * 2.0 * dx * dy + dcy;
-		dx = tx;
-
-		q += int(orbitScalePrev);
+		float linearScale = downscaleToExponent(linearExp, targetQ);
+		float squareScale = downscaleToExponent(squareExp, targetQ);
+		vec2 nextDelta = linearTerm * linearScale + squareTerm * squareScale;
+		if (!isJulia) {
+			float dcScale = downscaleToExponent(cq, targetQ);
+			nextDelta += vec2(baseDeltaX, baseDeltaY) * dcScale;
+		}
+		dx = nextDelta.x;
+		dy = nextDelta.y;
+		q = targetQ;
+		normalizePerturbation(dx, dy, q);
 		S = safeExp2(float(q));
 
 		k += 1;

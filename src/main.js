@@ -104,13 +104,13 @@ const METRIC_TEXTURE_OPTIONS = {
 	preserveY: false,
 };
 
-// 1D palette texture sampled by the display shader. RGBA8 is universally
-// filterable with LINEAR (RGBA32F isn't, without OES_texture_float_linear), so
-// the GPU handles smooth interpolation between palette entries for free.
-// REPEAT wrap makes the palette cycle seamlessly. 8-bit precision is plenty
-// for palette colors at display resolution.
+// 1D palette texture sampled by the display shader. SRGB8_ALPHA8 has the GPU
+// decode each entry from sRGB to linear on sample, so LINEAR filtering blends
+// adjacent entries in linear space — gamma-correct palette interpolation with
+// no per-pixel pow() in the shader. REPEAT wrap makes the palette cycle
+// seamlessly.
 const PALETTE_TEXTURE_OPTIONS = {
-	internalFormat: 'RGBA8',
+	internalFormat: 'SRGB8_ALPHA8',
 	format: 'RGBA',
 	type: 'UNSIGNED_BYTE',
 	minFilter: 'LINEAR',
@@ -709,12 +709,9 @@ profiler.setCanvas(canvas);
 
 const colors = new Float32Array(N_COLORS * 3);
 
-// Pack the current palette into an RGBA8 1D texture in sRGB-space directly.
-// The shader samples (with LINEAR filter for free interpolation) and outputs
-// straight to the canvas — no srgbToLinear/linearToSrgb round-trip. Mixing in
-// sRGB is slightly less colorimetrically correct than linear-space mixing but
-// the difference is imperceptible for fractal palette cycling AND it removes
-// 3 pow() calls per pixel from the display shader.
+// Pack the current palette into a 1D texture of sRGB-encoded bytes. The
+// SRGB8_ALPHA8 internal format on the GPU side decodes each entry to linear
+// on sample, so LINEAR filtering blends in linear space (gamma-correct).
 function buildPaletteTextureSource() {
 	const data = new Uint8Array(N_COLORS * 4);
 	for (let i = 0; i < N_COLORS; i++) {
@@ -728,15 +725,22 @@ function buildPaletteTextureSource() {
 	return { data, width: N_COLORS, height: 1 };
 }
 
+// sRGB → linear (IEC 61966-2-1). Matches the GPU's SRGB8_ALPHA8 decode, so
+// the inside color mixes correctly against the palette in linear space.
+function srgbToLinear(c) {
+	return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+}
+
 // Inside color (used when metric.w is low): 50/50 mix of palette[0] and
-// palette[1] at 18% brightness, computed in sRGB space.
+// palette[1] in linear space at 18% brightness. Uploaded as a linear-space
+// uniform so the display shader can mix it directly with the linear palette
+// sample.
 function getInsideColor() {
 	const INSIDE_BRIGHTNESS = 0.18;
-	return [
-		(colors[0] + colors[3]) * 0.5 * INSIDE_BRIGHTNESS,
-		(colors[1] + colors[4]) * 0.5 * INSIDE_BRIGHTNESS,
-		(colors[2] + colors[5]) * 0.5 * INSIDE_BRIGHTNESS,
-	];
+	const r = (srgbToLinear(colors[0]) + srgbToLinear(colors[3])) * 0.5;
+	const g = (srgbToLinear(colors[1]) + srgbToLinear(colors[4])) * 0.5;
+	const b = (srgbToLinear(colors[2]) + srgbToLinear(colors[5])) * 0.5;
+	return [r * INSIDE_BRIGHTNESS, g * INSIDE_BRIGHTNESS, b * INSIDE_BRIGHTNESS];
 }
 
 function updateColors(direction = 0) {
@@ -963,7 +967,7 @@ function getDeepShaderUniforms(renderState) {
 }
 
 function canRenderFromCurrentDeepReference(renderState) {
-	if (!deepZoomManager.hasCompatibleReferenceFor(renderState)) return false;
+	if (!deepZoomManager.hasRenderableReferenceFor(renderState)) return false;
 	const referenceOffset = deepZoomManager.getReferenceOffsetFor(renderState);
 	if (!referenceOffset) return false;
 	const maxOffset = Math.max(Math.abs(referenceOffset.offsetReal), Math.abs(referenceOffset.offsetImag));
@@ -972,10 +976,9 @@ function canRenderFromCurrentDeepReference(renderState) {
 
 function shouldRecenterDeepReference(renderState) {
 	if (!canRenderFromCurrentDeepReference(renderState)) return true;
-	// hasCompatibleReferenceFor no longer rejects on iteration count (so the deep
-	// renderer keeps drawing during a recompute instead of flashing standard), but
-	// we still need a recompute when the budget outgrows the existing orbit, since
-	// the strict-signature and offset checks below otherwise wouldn't catch it.
+	// Keep this explicit for preparation calls that pass a headroom-sized target
+	// state: even if the current frame can draw, the next reference may need a
+	// larger budget than the existing one.
 	if (deepZoomManager.referenceIterationsBelow(renderState)) return true;
 	if (deepZoomManager.hasReferenceFor(renderState)) return false;
 	const referenceOffset = deepZoomManager.getReferenceOffsetFor(renderState);
@@ -1061,15 +1064,22 @@ function syncDeepOrbitTexture() {
 	if (!deepIterationRenderer) return;
 
 	const orbitTextureSource = deepZoomManager.getOrbitTextureSource();
-	if (!orbitTextureSource) return;
+	const blaTextureSource = deepZoomManager.getBLATextureSource();
+	if (!orbitTextureSource || !blaTextureSource) return;
 
 	if (lastUploadedDeepOrbitSignature === deepZoomManager.referenceSignature) return;
 
 	profiler.measure('deep:uploadOrbit', () => {
 		if (lastUploadedDeepOrbitSignature === null) {
 			deepIterationRenderer.initializeTexture('u_orbitTexture', orbitTextureSource, ORBIT_TEXTURE_OPTIONS);
+			// BLA table uses the same RGBA32F NEAREST options as the orbit texture —
+			// both are sampled by index, not interpolated.
+			deepIterationRenderer.initializeTexture('u_blaTable', blaTextureSource, ORBIT_TEXTURE_OPTIONS);
 		} else {
-			deepIterationRenderer.updateTextures({ u_orbitTexture: orbitTextureSource });
+			deepIterationRenderer.updateTextures({
+				u_orbitTexture: orbitTextureSource,
+				u_blaTable: blaTextureSource,
+			});
 		}
 	});
 
@@ -1226,8 +1236,6 @@ function ensureDeepZoomPreparation(renderState, requested, support) {
 		return;
 	}
 	if (!support.supported) return;
-	// Replacing in-flight references during continuous zoom can starve the first deep render.
-	if (deepZoomManager.pendingReferencePromise) return;
 
 	const referenceIterations = getReferenceIterationCount(renderState.zoom, renderState.deepIterations);
 	const referenceTargetState = {
@@ -1237,6 +1245,13 @@ function ensureDeepZoomPreparation(renderState, requested, support) {
 		requiredIterations: renderState.deepIterations,
 		deepIterations: referenceIterations,
 	};
+
+	if (deepZoomManager.hasPendingReferenceFor(referenceTargetState)) return;
+	// Replacing in-flight references during continuous zoom can starve the first
+	// deep render, but only keep an older pending request when the current
+	// reference is still safe to draw. If fast zoom has already outgrown it,
+	// supersede the pending request with one that covers the current budget.
+	if (deepZoomManager.pendingReferencePromise && canRenderFromCurrentDeepReference(renderState)) return;
 
 	if (!shouldRecenterDeepReference(referenceTargetState)) return;
 
