@@ -895,10 +895,6 @@ function initializeStandardIterationUniforms(renderState) {
 	standardIterationRenderer.initializeUniform('u_escapeRadius', 'float', renderState.escapeRadius);
 	standardIterationRenderer.initializeUniform('u_logEscapeRadius', 'float', renderState.logEscapeRadius);
 	standardIterationRenderer.initializeUniform('u_iterations', 'int', renderState.iterations);
-	standardIterationRenderer.initializeUniform('u_slopeShading', 'int', renderState.slopeShading);
-	standardIterationRenderer.initializeUniform('u_slopeLightDir', 'float', renderState.slopeLightDir);
-	standardIterationRenderer.initializeUniform('u_slopeLightHeight', 'float', renderState.slopeLightHeight);
-	standardIterationRenderer.initializeUniform('u_slopeLightIntensity', 'float', renderState.slopeLightIntensity);
 	standardIterationRenderer.initializeUniform('u_stripeAverage', 'int', renderState.stripeAverage);
 }
 
@@ -922,10 +918,6 @@ function updateStandardIterationUniforms(renderState) {
 		u_escapeRadius: renderState.escapeRadius,
 		u_logEscapeRadius: renderState.logEscapeRadius,
 		u_iterations: renderState.iterations,
-		u_slopeShading: renderState.slopeShading,
-		u_slopeLightDir: renderState.slopeLightDir,
-		u_slopeLightHeight: renderState.slopeLightHeight,
-		u_slopeLightIntensity: renderState.slopeLightIntensity,
 		u_stripeAverage: renderState.stripeAverage,
 	});
 }
@@ -1022,10 +1014,6 @@ function initializeDeepIterationUniforms(renderState) {
 	deepIterationRenderer.initializeUniform('u_referenceOffset', 'float', deepUniforms.u_referenceOffset);
 	deepIterationRenderer.initializeUniform('u_escapeRadius', 'float', renderState.escapeRadius);
 	deepIterationRenderer.initializeUniform('u_logEscapeRadius', 'float', renderState.logEscapeRadius);
-	deepIterationRenderer.initializeUniform('u_slopeShading', 'int', renderState.slopeShading);
-	deepIterationRenderer.initializeUniform('u_slopeLightDir', 'float', renderState.slopeLightDir);
-	deepIterationRenderer.initializeUniform('u_slopeLightHeight', 'float', renderState.slopeLightHeight);
-	deepIterationRenderer.initializeUniform('u_slopeLightIntensity', 'float', renderState.slopeLightIntensity);
 	deepIterationRenderer.initializeUniform('u_stripeAverage', 'int', renderState.stripeAverage);
 	deepIterationRenderer.initializeUniform('u_seriesApproximation', 'int', renderState.seriesApproximation);
 	deepIterationRenderer.initializeUniform('u_poly1', 'float', deepUniforms.u_poly1);
@@ -1050,10 +1038,6 @@ function updateDeepIterationUniforms(renderState) {
 		u_referenceOffset: deepUniforms.u_referenceOffset,
 		u_escapeRadius: renderState.escapeRadius,
 		u_logEscapeRadius: renderState.logEscapeRadius,
-		u_slopeShading: renderState.slopeShading,
-		u_slopeLightDir: renderState.slopeLightDir,
-		u_slopeLightHeight: renderState.slopeLightHeight,
-		u_slopeLightIntensity: renderState.slopeLightIntensity,
 		u_stripeAverage: renderState.stripeAverage,
 		u_seriesApproximation: renderState.seriesApproximation,
 		u_poly1: deepUniforms.u_poly1,
@@ -1115,6 +1099,10 @@ function ensureDisplayRenderer(renderState, iterationRenderer) {
 	displayRenderer.initializeUniform('u_insideColor', 'float', getInsideColor());
 	displayRenderer.initializeUniform('u_paletteFrame', 'float', renderState.paletteFrame);
 	displayRenderer.initializeUniform('u_colorScale', 'float', renderState.colorScale);
+	displayRenderer.initializeUniform('u_slopeShading', 'int', renderState.slopeShading);
+	displayRenderer.initializeUniform('u_slopeLightDir', 'float', renderState.slopeLightDir);
+	displayRenderer.initializeUniform('u_slopeLightHeight', 'float', renderState.slopeLightHeight);
+	displayRenderer.initializeUniform('u_slopeLightIntensity', 'float', renderState.slopeLightIntensity);
 	displayRenderer.initializeTexture('u_palette', buildPaletteTextureSource(), PALETTE_TEXTURE_OPTIONS);
 	displayRenderer.initializeTexture('u_liveMetrics', iterationRenderer);
 	displayRendererColorsVersion = colorsVersion;
@@ -1124,6 +1112,10 @@ function updateDisplayUniforms(renderState) {
 	displayRenderer.updateUniforms({
 		u_paletteFrame: renderState.paletteFrame,
 		u_colorScale: renderState.colorScale,
+		u_slopeShading: renderState.slopeShading,
+		u_slopeLightDir: renderState.slopeLightDir,
+		u_slopeLightHeight: renderState.slopeLightHeight,
+		u_slopeLightIntensity: renderState.slopeLightIntensity,
 	});
 
 	if (displayRendererColorsVersion !== colorsVersion) {
@@ -1295,10 +1287,6 @@ function getDeepIterationRenderSignature(renderState) {
 		renderState.exponent,
 		renderState.cReal.toPrecision(12),
 		renderState.cImaginary.toPrecision(12),
-		renderState.slopeShading,
-		renderState.slopeLightDir.map(value => value.toPrecision(12)).join(','),
-		renderState.slopeLightHeight.toPrecision(12),
-		renderState.slopeLightIntensity.toPrecision(12),
 		renderState.stripeAverage,
 		renderState.seriesApproximation,
 		canvas.width,
@@ -1318,10 +1306,6 @@ function getStandardIterationRenderSignature(renderState) {
 		renderState.cImaginary.toPrecision(12),
 		renderState.escapeRadius.toPrecision(12),
 		renderState.logEscapeRadius.toPrecision(12),
-		renderState.slopeShading,
-		renderState.slopeLightDir.map(value => value.toPrecision(12)).join(','),
-		renderState.slopeLightHeight.toPrecision(12),
-		renderState.slopeLightIntensity.toPrecision(12),
 		renderState.stripeAverage,
 		canvas.width,
 		canvas.height,

@@ -15,11 +15,27 @@ uniform sampler2D u_palette;
 uniform vec3 u_insideColor;
 uniform float u_paletteFrame;
 uniform float u_colorScale;
+uniform int u_slopeShading;
+uniform vec2 u_slopeLightDir;
+uniform float u_slopeLightHeight;
+uniform float u_slopeLightIntensity;
 
 out vec4 outColor;
 
 // Bumped above 1 if more headroom is needed; tone map handles roll-off.
 const float EXPOSURE = 1.0;
+const float TAU = 6.283185307179586;
+const float METRIC_PACK_COMPONENT_SCALE = 4096.0;
+const float METRIC_PACK_DETAIL_SCALE = 1024.0;
+const float METRIC_PACK_NORMAL_BINS = 4094.0;
+const float METRIC_PACK_NORMAL_SENTINEL = 4095.0;
+const float METRIC_PACK_MAX = 16777215.0;
+
+struct VisualMetric {
+	float detailBrightness;
+	float normalAngle;
+	bool hasNormal;
+};
 
 // ACES filmic tone mapping (Narkowicz fit). Linear HDR in, linear LDR out.
 vec3 toneMapACES(vec3 x) {
@@ -51,15 +67,37 @@ vec4 sanitizeMetric(vec4 metric) {
 	) {
 		return vec4(0.0, 0.0, 1.0, 0.0);
 	}
-	return vec4(metric.x, metric.y, clamp(metric.z, 0.0, 4.0), clamp(metric.w, 0.0, 1.0));
+	return vec4(metric.x, metric.y, clamp(metric.z, 0.0, METRIC_PACK_MAX), clamp(metric.w, 0.0, 1.0));
+}
+
+VisualMetric unpackVisualMetric(float packedValue) {
+	float packed = floor(clamp(packedValue, 0.0, METRIC_PACK_MAX) + 0.5);
+	float detailBin = floor(packed / METRIC_PACK_COMPONENT_SCALE);
+	float normalBin = packed - detailBin * METRIC_PACK_COMPONENT_SCALE;
+	VisualMetric metric;
+	metric.detailBrightness = detailBin / METRIC_PACK_DETAIL_SCALE;
+	metric.hasNormal = normalBin < METRIC_PACK_NORMAL_SENTINEL;
+	metric.normalAngle = metric.hasNormal ? normalBin / METRIC_PACK_NORMAL_BINS * TAU : 0.0;
+	return metric;
+}
+
+float computeSlopeBrightness(VisualMetric visualMetric) {
+	if (u_slopeShading != 1 || !visualMetric.hasNormal) return 1.0;
+	vec2 normal = vec2(cos(visualMetric.normalAngle), sin(visualMetric.normalAngle));
+	float lightHeight = max(u_slopeLightHeight, 1e-3);
+	float diffuse = (dot(normal, normalize(u_slopeLightDir)) + lightHeight) / (1.0 + lightHeight);
+	diffuse = clamp(diffuse, 0.0, 1.0);
+	return max(0.0, mix(1.0, 0.45 + 0.85 * diffuse, u_slopeLightIntensity));
 }
 
 vec3 getPaletteColor(vec4 metric) {
+	VisualMetric visualMetric = unpackVisualMetric(metric.z);
 	float colorIdx = metric.x * u_colorScale + metric.y + u_paletteFrame;
 	// Linear-space sample, blended in linear by the SRGB8_ALPHA8 + LINEAR setup.
 	vec3 outsideColor = texture(u_palette, vec2(colorIdx / float(N_COLORS), 0.5)).rgb;
 	// No clamp: brightness/detail/slope can push above 1 — tone map handles roll-off.
-	return mix(u_insideColor, outsideColor * metric.z, metric.w);
+	float brightness = visualMetric.detailBrightness * computeSlopeBrightness(visualMetric);
+	return mix(u_insideColor, outsideColor * brightness, metric.w);
 }
 
 void main() {
