@@ -1,4 +1,4 @@
-import { GMPUtils, maxAbsWide, multiplyWide, toFloat } from './gmpUtils.js';
+import { GMPUtils } from './gmpUtils.js';
 import * as profiler from './profiler.js';
 import {
 	BLA_MAX_LEVELS,
@@ -13,8 +13,6 @@ import {
 	buildVisualPrefixTextureData,
 } from './deepZoomTables.js';
 
-// Must match STRIPE_AVERAGE_DENSITY in perturbationShader.js / fractal.frag.
-const STRIPE_AVERAGE_DENSITY = 8.0;
 const FRACTAL_TYPE_JULIA = 0;
 const FRACTAL_TYPE_MANDELBROT = 1;
 const SUPPORTED_FRACTAL_TYPES = new Set([FRACTAL_TYPE_JULIA, FRACTAL_TYPE_MANDELBROT]);
@@ -254,20 +252,6 @@ export class DeepZoomManager {
 		return textureData;
 	}
 
-	computeStripeAveragePresum(orbit, polynomialLimit) {
-		// Pre-sum stripeAverageAddend(z_i) over the reference orbit for i in [1, polynomialLimit];
-		// added back inside the SA warm start to cancel the seam at the SA-stable boundary.
-		if (polynomialLimit <= 0) return 0;
-		const limit = Math.min(polynomialLimit, Math.floor(orbit.length / 3) - 1);
-		let sum = 0;
-		for (let i = 1; i <= limit; i++) {
-			const refX = orbit[i * 3];
-			const refY = orbit[i * 3 + 1];
-			sum += 0.5 + 0.5 * Math.sin(STRIPE_AVERAGE_DENSITY * Math.atan2(refY, refX));
-		}
-		return sum;
-	}
-
 	getOrbitTextureSource() {
 		if (!this.orbitTextureData) return null;
 		return {
@@ -303,68 +287,8 @@ export class DeepZoomManager {
 		};
 	}
 
-	getShaderUniforms(currentRadiusMantissa, currentRadiusExponent) {
-		if (!this.referenceData) return null;
-		// Series approximation is enabled only for Mandelbrot exp 2 (the polynomial
-		// recurrence in gmpUtils currently bakes Mandelbrot's `+ 1` term, which is
-		// incorrect for Julia). For Julia we report zero polynomial coverage so the
-		// shader simply skips the warm start.
-		const compatibilitySignature = this.referenceState?.compatibilitySignature;
-		const isMandelbrotQuadratic = compatibilitySignature?.startsWith(`${FRACTAL_TYPE_MANDELBROT}|2|`) ?? false;
-		const polynomialLimit = isMandelbrotQuadratic ? this.referenceData.polynomialLimit : 0;
-		const stripeAveragePresum = isMandelbrotQuadratic ? (this.referenceData.stripeAveragePresum ?? 0) : 0;
-
-		// Rebake the polynomial coefficients against the *current* view radius (rather
-		// than the radius captured at reference-orbit compute time). The wide-form
-		// polynomialWide is constant w.r.t. zoom (it only depends on the reference
-		// orbit), but the linear/quadratic/cubic radius factors and the polyScale
-		// normalization must be recomputed each frame so the shader's
-		// `2^(pse + radiusExponent)` rescale matches the stored coefficients.
-		const radiusMantissa = currentRadiusMantissa ?? this.referenceData.radiusMantissa;
-		const radiusExponent = currentRadiusExponent ?? this.referenceData.radiusExponent;
-		const polynomialWide = this.referenceData.polynomialWide;
-		const linearScale = [radiusMantissa, 0];
-		const quadraticScale = [radiusMantissa * radiusMantissa, radiusExponent];
-		const cubicScale = [radiusMantissa * radiusMantissa * radiusMantissa, radiusExponent * 2];
-		const linearWideX = multiplyWide(linearScale, polynomialWide[0]);
-		const linearWideY = multiplyWide(linearScale, polynomialWide[1]);
-		const quadraticWideX = multiplyWide(quadraticScale, polynomialWide[2]);
-		const quadraticWideY = multiplyWide(quadraticScale, polynomialWide[3]);
-		const cubicWideX = multiplyWide(cubicScale, polynomialWide[4]);
-		const cubicWideY = multiplyWide(cubicScale, polynomialWide[5]);
-		// Normalize by the largest of the three radius-scaled coefficient magnitudes
-		// so all three terms fit cleanly in float32 once stored. Picking just |B'|
-		// (as we previously did) overflows |C'| or |D'| at deep zoom when the cubic
-		// term's accumulated exponent exceeds float32 range.
-		const linearMaxAbs = maxAbsWide(linearWideX, linearWideY);
-		const quadraticMaxAbs = maxAbsWide(quadraticWideX, quadraticWideY);
-		const cubicMaxAbs = maxAbsWide(cubicWideX, cubicWideY);
-		const linearExp = linearMaxAbs[0] !== 0 ? linearMaxAbs[1] : -Infinity;
-		const quadraticExp = quadraticMaxAbs[0] !== 0 ? quadraticMaxAbs[1] : -Infinity;
-		const cubicExp = cubicMaxAbs[0] !== 0 ? cubicMaxAbs[1] : -Infinity;
-		const finiteExp = Math.max(
-			Number.isFinite(linearExp) ? linearExp : -1024,
-			Number.isFinite(quadraticExp) ? quadraticExp : -1024,
-			Number.isFinite(cubicExp) ? cubicExp : -1024,
-		);
-		const polyScaleExponent = finiteExp;
-		const polyScale = [1, -polyScaleExponent];
-
-		return {
-			u_orbitLength: this.referenceData.orbitLength,
-			u_poly1: [
-				toFloat(multiplyWide(polyScale, linearWideX)),
-				toFloat(multiplyWide(polyScale, linearWideY)),
-				toFloat(multiplyWide(polyScale, quadraticWideX)),
-				toFloat(multiplyWide(polyScale, quadraticWideY)),
-			],
-			u_poly2: [toFloat(multiplyWide(polyScale, cubicWideX)), toFloat(multiplyWide(polyScale, cubicWideY))],
-			u_polynomialLimit: polynomialLimit,
-			u_polyScaleExponent: polyScaleExponent,
-			u_stripeAveragePresum: stripeAveragePresum,
-			u_radiusMantissa: radiusMantissa,
-			u_radiusExponent: radiusExponent,
-		};
+	getReferenceOrbitLength() {
+		return this.referenceData?.orbitLength ?? 0;
 	}
 
 	async findGoodReferenceCenter(
@@ -410,7 +334,6 @@ export class DeepZoomManager {
 				this.gmp.computeReferenceData(
 					newtonCenter.centerReal,
 					newtonCenter.centerImag,
-					radius,
 					targetIterations,
 					options,
 				),
@@ -436,7 +359,7 @@ export class DeepZoomManager {
 
 		const trySample = (sReal, sImag) => {
 			const result = profiler.measure('ref:sample.computeOrbit', () =>
-				this.gmp.computeReferenceData(sReal, sImag, radius, requiredIterations, options),
+				this.gmp.computeReferenceData(sReal, sImag, requiredIterations, options),
 			);
 			if (result.orbitLength > bestOrbitLength) {
 				bestCenterReal = sReal;
@@ -460,7 +383,7 @@ export class DeepZoomManager {
 
 		profiler.note('ref:sample.bestOrbitLength', bestOrbitLength);
 		const finalResult = profiler.measure('ref:sample.computeFinalOrbit', () =>
-			this.gmp.computeReferenceData(bestCenterReal, bestCenterImag, radius, targetIterations, options),
+			this.gmp.computeReferenceData(bestCenterReal, bestCenterImag, targetIterations, options),
 		);
 		profiler.note('ref:orbitLength', finalResult.orbitLength);
 		return {
@@ -506,10 +429,6 @@ export class DeepZoomManager {
 					return this.orbitTextureData;
 				}
 
-				referenceData.stripeAveragePresum = this.computeStripeAveragePresum(
-					referenceData.orbit,
-					referenceData.polynomialLimit,
-				);
 				this.referenceData = referenceData;
 				// Track the center that was actually iterated (findGoodReferenceCenter may
 				// have shifted it). getReferenceOffsetFor reads this to build u_referenceOffset.

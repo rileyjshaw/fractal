@@ -72,9 +72,6 @@ const DEEP_REFERENCE_ITERATION_HEADROOM_EXPONENT = 12;
 // (stored < target) doesn't fire every zoom unit. Sized to cover several zoom
 // units of u_iterations growth per recompute.
 const DEEP_REFERENCE_ITERATION_QUANTUM = 4096;
-// Series-approximation warm start has unresolved validity-region artifacts and
-// zoom-dependent stripe/color shifts. Off until those are fixed.
-const ENABLE_DEEP_SERIES_APPROXIMATION = false;
 const DEEP_INTERACTION_MOTION_SETTLE_MS = 200;
 // Absolute pixel density (CSS-pixel multiplier) used while the user is interacting.
 // Half of non-retina resolution — quartering the linear density on a 2x retina, so
@@ -941,21 +938,12 @@ function decomposeRadiusExact(radiusExact, fallbackRadius) {
 
 function getDeepShaderUniforms(renderState) {
 	const { mantissa, exponent } = decomposeRadiusExact(renderState.radiusExact, renderState.radius);
-	// The polynomial uniforms are rebuilt against the current view radius (mantissa,
-	// exponent) on each call. Reusing the radius captured at reference-compute time
-	// would otherwise drift the shape as the user zooms within a single reference orbit.
-	const referenceUniforms = deepZoomManager.getShaderUniforms(mantissa, exponent);
 	const referenceOffset = deepZoomManager.getReferenceOffsetFor(renderState);
 	return {
-		u_orbitLength: referenceUniforms?.u_orbitLength ?? 0,
+		u_orbitLength: deepZoomManager.getReferenceOrbitLength(),
 		u_radiusMantissa: mantissa,
 		u_radiusExponent: exponent,
 		u_referenceOffset: [referenceOffset?.offsetReal ?? 0, referenceOffset?.offsetImag ?? 0],
-		u_poly1: referenceUniforms?.u_poly1 ?? [0, 0, 0, 0],
-		u_poly2: referenceUniforms?.u_poly2 ?? [0, 0],
-		u_polynomialLimit: referenceUniforms?.u_polynomialLimit ?? 0,
-		u_polyScaleExponent: referenceUniforms?.u_polyScaleExponent ?? 0,
-		u_stripeAveragePresum: referenceUniforms?.u_stripeAveragePresum ?? 0,
 	};
 }
 
@@ -1015,20 +1003,10 @@ function initializeDeepIterationUniforms(renderState) {
 	deepIterationRenderer.initializeUniform('u_escapeRadius', 'float', renderState.escapeRadius);
 	deepIterationRenderer.initializeUniform('u_logEscapeRadius', 'float', renderState.logEscapeRadius);
 	deepIterationRenderer.initializeUniform('u_stripeAverage', 'int', renderState.stripeAverage);
-	deepIterationRenderer.initializeUniform('u_seriesApproximation', 'int', renderState.seriesApproximation);
-	deepIterationRenderer.initializeUniform('u_poly1', 'float', deepUniforms.u_poly1);
-	deepIterationRenderer.initializeUniform('u_poly2', 'float', deepUniforms.u_poly2);
-	deepIterationRenderer.initializeUniform('u_polynomialLimit', 'int', deepUniforms.u_polynomialLimit);
-	deepIterationRenderer.initializeUniform('u_polyScaleExponent', 'int', deepUniforms.u_polyScaleExponent);
-	deepIterationRenderer.initializeUniform('u_stripeAveragePresum', 'float', deepUniforms.u_stripeAveragePresum);
 }
 
 function updateDeepIterationUniforms(renderState) {
 	const deepUniforms = getDeepShaderUniforms(renderState);
-	// Polynomial uniforms used to be uploaded only when the reference orbit changed,
-	// but they're now radius-dependent (rebuilt each frame in deepZoom.getShaderUniforms
-	// so the SA warm start matches the current view), so we upload them unconditionally.
-	// Cost is six floats + two ints per frame, negligible vs the iteration shader work.
 	deepIterationRenderer.updateUniforms({
 		u_iterations: renderState.deepIterations,
 		u_orbitLength: deepUniforms.u_orbitLength,
@@ -1039,12 +1017,6 @@ function updateDeepIterationUniforms(renderState) {
 		u_escapeRadius: renderState.escapeRadius,
 		u_logEscapeRadius: renderState.logEscapeRadius,
 		u_stripeAverage: renderState.stripeAverage,
-		u_seriesApproximation: renderState.seriesApproximation,
-		u_poly1: deepUniforms.u_poly1,
-		u_poly2: deepUniforms.u_poly2,
-		u_polynomialLimit: deepUniforms.u_polynomialLimit,
-		u_polyScaleExponent: deepUniforms.u_polyScaleExponent,
-		u_stripeAveragePresum: deepUniforms.u_stripeAveragePresum,
 	});
 }
 
@@ -1181,7 +1153,6 @@ function getRenderState() {
 		slopeLightHeight,
 		slopeLightIntensity,
 		stripeAverage: state.stripeAverage,
-		seriesApproximation: ENABLE_DEEP_SERIES_APPROXIMATION ? 1 : 0,
 	};
 	return renderState;
 }
@@ -1288,7 +1259,6 @@ function getDeepIterationRenderSignature(renderState) {
 		renderState.cReal.toPrecision(12),
 		renderState.cImaginary.toPrecision(12),
 		renderState.stripeAverage,
-		renderState.seriesApproximation,
 		canvas.width,
 		canvas.height,
 	].join('|');

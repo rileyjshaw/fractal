@@ -14,77 +14,6 @@ const REFERENCE_ESCAPE_MAGNITUDE_SQ = 64 * 64;
 // the base period would bound out.
 const NEWTON_PERIOD_MULTIPLIERS = [1, 2, 4, 8];
 
-export function cloneWide([mantissa, exponent]) {
-	return [mantissa, exponent];
-}
-
-function addWide(a, b) {
-	let [am, ae] = a;
-	let [bm, be] = b;
-	const resultExponent = Math.max(ae, be);
-	if (resultExponent > ae) {
-		am *= Math.pow(2, ae - resultExponent);
-	} else {
-		bm *= Math.pow(2, be - resultExponent);
-	}
-	return [am + bm, resultExponent];
-}
-
-function subtractWide(a, b) {
-	let [am, ae] = a;
-	let [bm, be] = b;
-	const resultExponent = Math.max(ae, be);
-	if (resultExponent > ae) {
-		am *= Math.pow(2, ae - resultExponent);
-	} else {
-		bm *= Math.pow(2, be - resultExponent);
-	}
-	return [am - bm, resultExponent];
-}
-
-export function multiplyWide(a, b) {
-	const [am, ae] = a;
-	const [bm, be] = b;
-	let mantissa = am * bm;
-	let exponent = ae + be;
-
-	if (mantissa !== 0) {
-		const mantissaExponent = Math.round(Math.log2(Math.abs(mantissa)));
-		mantissa /= Math.pow(2, mantissaExponent);
-		exponent += mantissaExponent;
-	}
-
-	return [mantissa, exponent];
-}
-
-export function maxAbsWide(a, b) {
-	let [am, ae] = a;
-	let [bm, be] = b;
-	const resultExponent = Math.max(ae, be);
-	if (resultExponent > ae) {
-		am *= Math.pow(2, ae - resultExponent);
-	} else {
-		bm *= Math.pow(2, be - resultExponent);
-	}
-	return [Math.max(Math.abs(am), Math.abs(bm)), resultExponent];
-}
-
-function greaterThanWide(a, b) {
-	let [am, ae] = a;
-	let [bm, be] = b;
-	const resultExponent = Math.max(ae, be);
-	if (resultExponent > ae) {
-		am *= Math.pow(2, ae - resultExponent);
-	} else {
-		bm *= Math.pow(2, be - resultExponent);
-	}
-	return am > bm;
-}
-
-export function toFloat(wide) {
-	return wide[0] * Math.pow(2, wide[1]);
-}
-
 export class GMPUtils {
 	constructor() {
 		this.binding = null;
@@ -278,13 +207,7 @@ export class GMPUtils {
 		}
 	}
 
-	computeReferenceData(
-		centerReal,
-		centerImag,
-		radius,
-		iterations,
-		{ fractalType = 1, cReal = 0, cImaginary = 0 } = {},
-	) {
+	computeReferenceData(centerReal, centerImag, iterations, { fractalType = 1, cReal = 0, cImaginary = 0 } = {}) {
 		if (!this.binding) {
 			throw new Error('GMP-WASM not initialized');
 		}
@@ -314,25 +237,6 @@ export class GMPUtils {
 			escapeMagnitude = this.createMPFR();
 			exponentPointer = this.binding.malloc(8);
 
-			const radiusWide = this.decomposeValue(radius);
-
-			let bx = [0, 0];
-			let by = [0, 0];
-			let cxPoly = [0, 0];
-			let cyPoly = [0, 0];
-			let dxPoly = [0, 0];
-			let dyPoly = [0, 0];
-			let polynomial = [
-				cloneWide(bx),
-				cloneWide(by),
-				cloneWide(cxPoly),
-				cloneWide(cyPoly),
-				cloneWide(dxPoly),
-				cloneWide(dyPoly),
-			];
-			let polynomialLimit = 0;
-			let polynomialStable = true;
-
 			let actualIterations = 0;
 
 			for (let i = 0; i < iterations && i < ORBIT_CAPACITY; i++) {
@@ -352,18 +256,6 @@ export class GMPUtils {
 					orbit[3 * i + 2] = scaleExponent;
 				}
 
-				const fx = [orbit[3 * i], orbit[3 * i + 2]];
-				const fy = [orbit[3 * i + 1], orbit[3 * i + 2]];
-
-				const previousPolynomial = [
-					cloneWide(bx),
-					cloneWide(by),
-					cloneWide(cxPoly),
-					cloneWide(cyPoly),
-					cloneWide(dxPoly),
-					cloneWide(dyPoly),
-				];
-
 				this.binding.mpfr_mul(x2, x, x, 0);
 				this.binding.mpfr_mul(y2, y, y, 0);
 				this.binding.mpfr_sub(temp, x2, y2, 0);
@@ -375,54 +267,6 @@ export class GMPUtils {
 
 				this.binding.mpfr_set(x, temp, 0);
 				this.binding.mpfr_set(y, xy, 0);
-
-				[bx, by, cxPoly, cyPoly, dxPoly, dyPoly] = [
-					addWide(multiplyWide([2, 0], subtractWide(multiplyWide(fx, bx), multiplyWide(fy, by))), [1, 0]),
-					multiplyWide([2, 0], addWide(multiplyWide(fx, by), multiplyWide(fy, bx))),
-					subtractWide(
-						addWide(
-							multiplyWide([2, 0], subtractWide(multiplyWide(fx, cxPoly), multiplyWide(fy, cyPoly))),
-							multiplyWide(bx, bx),
-						),
-						multiplyWide(by, by),
-					),
-					addWide(
-						multiplyWide([2, 0], addWide(multiplyWide(fx, cyPoly), multiplyWide(fy, cxPoly))),
-						multiplyWide(multiplyWide([2, 0], bx), by),
-					),
-					multiplyWide(
-						[2, 0],
-						addWide(
-							subtractWide(multiplyWide(fx, dxPoly), multiplyWide(fy, dyPoly)),
-							subtractWide(multiplyWide(cxPoly, bx), multiplyWide(cyPoly, by)),
-						),
-					),
-					multiplyWide(
-						[2, 0],
-						addWide(
-							addWide(
-								addWide(multiplyWide(fx, dyPoly), multiplyWide(fy, dxPoly)),
-								multiplyWide(cxPoly, by),
-							),
-							multiplyWide(cyPoly, bx),
-						),
-					),
-				];
-
-				if (
-					i === 0 ||
-					greaterThanWide(
-						maxAbsWide(cxPoly, cyPoly),
-						multiplyWide(multiplyWide([1000, 0], radiusWide), maxAbsWide(dxPoly, dyPoly)),
-					)
-				) {
-					if (polynomialStable) {
-						polynomial = previousPolynomial;
-						polynomialLimit = i;
-					}
-				} else {
-					polynomialStable = false;
-				}
 
 				this.binding.mpfr_mul(temp, x, x, 0);
 				this.binding.mpfr_mul(xy, y, y, 0);
@@ -438,20 +282,9 @@ export class GMPUtils {
 				throw new Error('No iterations completed in orbit computation');
 			}
 
-			const [radiusMantissa, radiusExponent] = radiusWide;
-
-			// Return the polynomial in its un-radius-scaled wide form. The radius factors
-			// (linear/quadratic/cubic) and the polyScale-exponent normalization are applied
-			// per-frame in deepZoom.getShaderUniforms against the *current* view radius;
-			// baking them in here would lock the polynomial to the reference-time radius
-			// and distort the perturbation evaluation as the user zooms.
 			return {
 				orbit: orbit.subarray(0, actualIterations * 3),
 				orbitLength: actualIterations,
-				polynomialWide: polynomial,
-				polynomialLimit,
-				radiusMantissa,
-				radiusExponent,
 			};
 		} finally {
 			if (exponentPointer) {

@@ -13,8 +13,6 @@ precision highp float;
 #define FRACTAL_TYPE_JULIA 0
 #define FRACTAL_TYPE_MANDELBROT 1
 #define ORBIT_TEXTURE_SIZE ${ORBIT_TEXTURE_SIZE}
-#define MIN_SERIES_APPROXIMATION_ITERATIONS 16
-#define SERIES_APPROXIMATION_SAFETY_RATIO 0.001
 #define BAILOUT_PERTURBATION_DELTA_SQ 1.0e6
 // |dz| grows as ~prod(2*|Z|) and overflows float32 in deep zoom, so we carry it as a
 // (mantissa, log-offset) pair: log|dz| = log(length(mantissa)) + logOffset.
@@ -44,12 +42,6 @@ uniform int u_radiusExponent;
 uniform vec2 u_referenceOffset;
 uniform float u_escapeRadius;
 uniform float u_logEscapeRadius;
-uniform vec4 u_poly1;
-uniform vec2 u_poly2;
-uniform int u_polynomialLimit;
-uniform int u_polyScaleExponent;
-uniform float u_stripeAveragePresum;
-uniform int u_seriesApproximation;
 uniform int u_stripeAverage;
 
 out vec4 FragColor;
@@ -246,51 +238,8 @@ void main() {
 	float finalDerivativeLogOffset = 0.0;
 	float logViewRadius = log(max(abs(u_radiusMantissa), 1e-30)) + float(u_radiusExponent) * log(2.0);
 
-	// --- Series-approximation warm start (Mandelbrot quadratic only).
-	// The polynomial gives delta_z at iteration polynomialLimit as a cubic in pixel delta.
-	// We trust the JS-side stability check up to that iteration but additionally reject
-	// the warm start per-pixel if the cubic term is too large vs the quadratic term.
-	if (
-		u_seriesApproximation == 1 &&
-		!isJulia &&
-		u_polynomialLimit >= MIN_SERIES_APPROXIMATION_ITERATIONS &&
-		u_polynomialLimit < orbitLength - 1
-	) {
-		float u = delta.x + u_referenceOffset.x;
-		float v = delta.y + u_referenceOffset.y;
-		float u2 = u * u - v * v;
-		float v2 = 2.0 * u * v;
-		float u3 = u * u2 - v * v2;
-		float v3 = u * v2 + v * u2;
-
-		float linMag = sqrt(u_poly1.x * u_poly1.x + u_poly1.y * u_poly1.y) * sqrt(u * u + v * v);
-		float quadMag = sqrt(u_poly1.z * u_poly1.z + u_poly1.w * u_poly1.w) * (u * u + v * v);
-		float cubicMag = sqrt(u_poly2.x * u_poly2.x + u_poly2.y * u_poly2.y) * sqrt(u3 * u3 + v3 * v3);
-
-		float dominant = max(linMag, quadMag);
-		if (dominant > 1e-30 && cubicMag < SERIES_APPROXIMATION_SAFETY_RATIO * dominant) {
-			dx = u_poly1.x * u - u_poly1.y * v
-				+ u_poly1.z * u2 - u_poly1.w * v2
-				+ u_poly2.x * u3 - u_poly2.y * v3;
-			dy = u_poly1.x * v + u_poly1.y * u
-				+ u_poly1.z * v2 + u_poly1.w * u2
-				+ u_poly2.x * v3 + u_poly2.y * u3;
-			q = u_polyScaleExponent + u_radiusExponent;
-			S = safeExp2(float(q));
-			k = u_polynomialLimit;
-			j = u_polynomialLimit;
-			orbitCurrent = getOrbit(k);
-			// SA skips iterations [1, polynomialLimit], so add back the reference-orbit
-			// stripe sum the JS side precomputed; without this the SA-stable region shows
-			// a circular seam where its stripe total disagrees with the rest of the frame.
-			stripeTotal += u_stripeAveragePresum;
-			detailSamples += u_polynomialLimit;
-		}
-	}
-
 	for (int i = 0; i < u_iterations; i++) {
-		// j is the "true" iteration count (offset by polynomialLimit on series-approximation
-		// warm starts); cap against u_iterations so SA never inflates total iteration work.
+		// j tracks the iteration count; cap against u_iterations.
 		if (j >= u_iterations || k >= orbitLength - 1) break;
 
 		j += 1;
