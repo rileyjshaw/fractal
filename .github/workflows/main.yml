@@ -6,6 +6,10 @@ on:
   push:
     branches: ['main']
 
+  # Runs the test/format checks on pull requests (without deploying)
+  pull_request:
+    branches: ['main']
+
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
@@ -15,18 +19,37 @@ permissions:
   pages: write
   id-token: write
 
-# Allow one concurrent deployment
-concurrency:
-  group: 'pages'
-  cancel-in-progress: true
-
 jobs:
-  # Single deploy job since we're just deploying
+  # Format check + unit tests. Gates deploy and also runs on PRs.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Check formatting
+        run: npm run format:check
+      - name: Run tests
+        run: npm test
+
   deploy:
+    # Only deploy from main; PRs run the test job above but never publish.
+    if: github.event_name != 'pull_request'
+    needs: test
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
+    # Allow one concurrent deployment
+    concurrency:
+      group: 'pages'
+      cancel-in-progress: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4

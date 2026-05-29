@@ -554,7 +554,7 @@ function resetState() {
 	paletteFrame = 0;
 	lastPaletteUpdateMs = null;
 	updateColors(0);
-	deepZoomManager.invalidate('reset');
+	deepZoomManager.invalidate();
 	lastStandardIterationRenderSignature = null;
 	lastDeepIterationRenderSignature = null;
 	lastUploadedDeepOrbitSignature = null;

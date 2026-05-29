@@ -8,7 +8,10 @@
 		"build": "vite build",
 		"generate-pwa-assets": "pwa-assets-generator",
 		"preview": "vite preview",
-		"lint": "prettier --write src/**/*.{html,css,js,json} && prettier --plugin prettier-plugin-glsl --parser glsl-parser --write src/**/*.frag"
+		"test": "node --test",
+		"format": "prettier --write \"src/**/*.{html,css,js,json}\" && prettier --plugin prettier-plugin-glsl --parser glsl-parser --write \"src/**/*.frag\"",
+		"format:check": "prettier --check \"src/**/*.{html,css,js,json}\" && prettier --plugin prettier-plugin-glsl --parser glsl-parser --check \"src/**/*.frag\"",
+		"lint": "npm run format"
 	},
 	"devDependencies": {
 		"@vite-pwa/assets-generator": "^1.0.2",

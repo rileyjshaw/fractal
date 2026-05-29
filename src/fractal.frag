@@ -88,7 +88,9 @@ float getSlopeNormalAngle(vec2 z, vec2 dz) {
 	if (!isFiniteFloat(len) || len < 1e-20) return NO_NORMAL_ANGLE;
 	n /= len;
 	float angle = atan(n.y, n.x);
-	return angle < 0.0 ? angle + TAU : angle;
+	return angle < 0.0
+		? angle + TAU
+		: angle;
 }
 
 float packVisualMetric(float detailBrightness, float normalAngle) {

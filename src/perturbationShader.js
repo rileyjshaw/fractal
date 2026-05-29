@@ -136,10 +136,6 @@ float smoothEscape(int iteration, float magnitude) {
 	return float(iteration) + 1.0 - nu;
 }
 
-float orbitDetailValue(vec2 z) {
-	return 1.0 / (1.0 + dot(z, z));
-}
-
 float stripeAverageAddend(vec2 z) {
 	return 0.5 + 0.5 * sin(STRIPE_AVERAGE_DENSITY * atan(z.y, z.x));
 }
@@ -181,7 +177,7 @@ vec4 interiorMetric() {
 	return vec4(0.0, 0.0, packVisualMetric(1.0, NO_NORMAL_ANGLE), float(u_stripeAverage));
 }
 
-vec2 distanceEstimateMetrics(vec2 z, vec2 dz, float dzLogOffset, float logViewRadius, float pixelRadius) {
+vec2 distanceEstimateMetrics(vec2 z, vec2 dz, float dzLogOffset, float logViewRadius) {
 	// boundarySignal comes from the Milnor distance estimate; coverage is always 1 since
 	// the caller only invokes this for escaped pixels (in deep zoom the distance falls
 	// far below a pixel and would otherwise blend toward the interior colour).
@@ -198,24 +194,6 @@ vec2 distanceEstimateMetrics(vec2 z, vec2 dz, float dzLogOffset, float logViewRa
 	return vec2(boundarySignal, 1.0);
 }
 
-// See fractal.frag::buildMetric for the metric layout.
-vec4 buildMetric(
-	float smoothIters,
-	float detailTotal,
-	float stripeTotal,
-	float lastStripeValue,
-	int detailSamples,
-	float magnitudeSq,
-	float coverage
-) {
-	float detailAverage = detailSamples > 0 ? detailTotal / float(detailSamples) : 0.5;
-	float detailWeight = coverage < 0.5 ? 1.0 : smoothstep(3.0, 24.0, float(detailSamples));
-	float detailBrightness = mix(1.0, mix(0.82, 1.16, detailAverage), detailWeight);
-	float stripeOffset = stripePaletteOffset(stripeTotal, lastStripeValue, detailSamples, magnitudeSq);
-	float finalCoverage = max(coverage, float(u_stripeAverage));
-	return vec4(smoothIters, stripeOffset, packVisualMetric(detailBrightness, NO_NORMAL_ANGLE), finalCoverage);
-}
-
 vec4 buildDistanceMetric(
 	float smoothIters,
 	vec2 z,
@@ -224,11 +202,10 @@ vec4 buildDistanceMetric(
 	float stripeTotal,
 	float lastStripeValue,
 	int detailSamples,
-	float logViewRadius,
-	float pixelRadius
+	float logViewRadius
 ) {
 	float detailWeight = smoothstep(4.0, 32.0, float(detailSamples));
-	vec2 deMetrics = distanceEstimateMetrics(z, dz, dzLogOffset, logViewRadius, pixelRadius);
+	vec2 deMetrics = distanceEstimateMetrics(z, dz, dzLogOffset, logViewRadius);
 	float boundarySignal = deMetrics.x;
 	float coverage = deMetrics.y;
 	float detailBrightness = mix(1.0, 1.16, boundarySignal * detailWeight);
@@ -242,7 +219,6 @@ void main() {
 	// Branchless aspect-ratio handling: one axis is unit-1, the other extends to the aspect ratio.
 	vec2 pixelScale = u_resolution / min(u_resolution.x, u_resolution.y);
 	vec2 delta = (gl_FragCoord.xy / u_resolution * 2.0 - 1.0) * pixelScale;
-	float pixelRadius = 1.0 / max(u_resolution.x, u_resolution.y);
 
 	int orbitLength = max(u_orbitLength, 1);
 	int cq = u_radiusExponent;
@@ -259,7 +235,6 @@ void main() {
 	vec3 orbit0 = getOrbit(0);
 	vec3 orbitCurrent = orbit0;
 	float smoothIters = 0.0;
-	float detailTotal = 0.0;
 	float stripeTotal = 0.0;
 	float lastStripeValue = 0.5;
 	int detailSamples = 0;
@@ -386,7 +361,6 @@ void main() {
 					// Keep visual accumulators continuous across the BLA validity
 					// boundary. The reference samples are a good approximation exactly
 					// where BLA is valid because perturbations are small by definition.
-					detailTotal += prefixAfter.x - prefixBefore.x;
 					stripeTotal += prefixAfter.y - prefixBefore.y;
 					lastStripeValue = prefixAfter.z;
 					detailSamples += blaChunkSize;
@@ -467,7 +441,6 @@ void main() {
 			finalZ = vec2(fx, fy);
 			finalDerivative = derivative;
 			finalDerivativeLogOffset = derivativeLogOffset;
-			detailTotal += orbitDetailValue(finalZ);
 			lastStripeValue = stripeAverageAddend(finalZ);
 			stripeTotal += lastStripeValue;
 			detailSamples += 1;
@@ -530,8 +503,7 @@ void main() {
 			stripeTotal,
 			lastStripeValue,
 			detailSamples,
-			logViewRadius,
-			pixelRadius
+			logViewRadius
 		);
 	} else {
 		FragColor = interiorMetric();

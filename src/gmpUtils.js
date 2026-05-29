@@ -85,15 +85,6 @@ export function toFloat(wide) {
 	return wide[0] * Math.pow(2, wide[1]);
 }
 
-function decomposeFloat(value) {
-	if (value === 0) {
-		return [0, 0];
-	}
-
-	const exponent = Math.floor(Math.log2(Math.abs(value))) + 1;
-	return [value / Math.pow(2, exponent), exponent];
-}
-
 export class GMPUtils {
 	constructor() {
 		this.binding = null;
@@ -470,10 +461,6 @@ export class GMPUtils {
 		}
 	}
 
-	computeReferenceOrbit(centerReal, centerImag, iterations) {
-		return this.computeReferenceData(centerReal, centerImag, 1, iterations).orbit;
-	}
-
 	// Find a periodic point of the z² + c iteration near the requested center.
 	// Periodic points have orbit length effectively infinite (the orbit cycles without
 	// escaping), so they make ideal reference centers — grid sampling can miss tiny
@@ -762,7 +749,11 @@ export class GMPUtils {
 
 					const dcxD = this.binding.mpfr_get_d(dcx, 0);
 					const dcyD = this.binding.mpfr_get_d(dcy, 0);
-					if (Number.isFinite(dcxD) && Number.isFinite(dcyD) && dcxD * dcxD + dcyD * dcyD < newtonStepSqTolerance) {
+					if (
+						Number.isFinite(dcxD) &&
+						Number.isFinite(dcyD) &&
+						dcxD * dcxD + dcyD * dcyD < newtonStepSqTolerance
+					) {
 						break;
 					}
 				}
@@ -840,12 +831,32 @@ export class GMPUtils {
 			return bestResult;
 		} finally {
 			this.disposeMPFR(
-				cx, cy, origCx, origCy, juliaCx, juliaCy, maxRadiusValue,
-				gx, gy, gpx, gpy,
-				t1, t2, t3, t4,
-				dcx, dcy, denom,
-				residualX, residualY, denomX, denomY,
-				diffX, diffY, distSq, distLimit,
+				cx,
+				cy,
+				origCx,
+				origCy,
+				juliaCx,
+				juliaCy,
+				maxRadiusValue,
+				gx,
+				gy,
+				gpx,
+				gpy,
+				t1,
+				t2,
+				t3,
+				t4,
+				dcx,
+				dcy,
+				denom,
+				residualX,
+				residualY,
+				denomX,
+				denomY,
+				diffX,
+				diffY,
+				distSq,
+				distLimit,
 			);
 		}
 	}
