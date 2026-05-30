@@ -9,8 +9,8 @@
 		"generate-pwa-assets": "pwa-assets-generator",
 		"preview": "vite preview",
 		"test": "node --test",
-		"format": "prettier --write \"src/**/*.{html,css,js,json}\" && prettier --plugin prettier-plugin-glsl --parser glsl-parser --write \"src/**/*.frag\"",
-		"format:check": "prettier --check \"src/**/*.{html,css,js,json}\" && prettier --plugin prettier-plugin-glsl --parser glsl-parser --check \"src/**/*.frag\"",
+		"format": "prettier --write \"src/**/*.{html,css,js,json}\"",
+		"format:check": "prettier --check \"src/**/*.{html,css,js,json}\"",
 		"lint": "npm run format"
 	},
 	"devDependencies": {
