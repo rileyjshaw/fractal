@@ -5,6 +5,7 @@ import {
 	BLA_TEXTURE_WIDTH,
 	ORBIT_TEXTURE_SIZE,
 } from './deepZoomTables.js';
+import { GLSL_IS_FINITE, GLSL_METRIC_SHARED, GLSL_PACK_CONSTANTS, N_COLORS } from './shaderCommon.js';
 
 export function generatePerturbationShader() {
 	return `#version 300 es
@@ -12,6 +13,7 @@ precision highp float;
 
 #define FRACTAL_TYPE_JULIA 0
 #define FRACTAL_TYPE_MANDELBROT 1
+#define N_COLORS ${N_COLORS}
 #define ORBIT_TEXTURE_SIZE ${ORBIT_TEXTURE_SIZE}
 #define BAILOUT_PERTURBATION_DELTA_SQ 1.0e6
 // |dz| grows as ~prod(2*|Z|) and overflows float32 in deep zoom, so we carry it as a
@@ -46,25 +48,10 @@ uniform int u_stripeAverage;
 
 out vec4 FragColor;
 
-const float STRIPE_AVERAGE_DENSITY = 8.0;
-// One palette wrap per unit of stripe variation; see fractal.frag for rationale.
-const float STRIPE_AVERAGE_COLOR_SCALE = 32.0;
-const float STRIPE_AVERAGE_ESCAPE_RADIUS = 64.0;
 const float LOG_2 = 0.6931471805599453;
-const float TAU = 6.283185307179586;
-const float METRIC_PACK_COMPONENT_SCALE = 4096.0;
-const float METRIC_PACK_DETAIL_SCALE = 1024.0;
-const float METRIC_PACK_NORMAL_BINS = 4094.0;
-const float METRIC_PACK_NORMAL_SENTINEL = 4095.0;
-const float NO_NORMAL_ANGLE = -1.0;
-
+${GLSL_PACK_CONSTANTS}${GLSL_IS_FINITE}
 float safeExp2(float exponent) {
 	return exp2(clamp(exponent, -126.0, 126.0));
-}
-
-bool isFiniteFloat(float value) {
-	// GLSL's isnan/isinf are unreliable under fast-math; check magnitude directly.
-	return value == value && abs(value) < 3.0e38;
 }
 
 float downscaleToExponent(int sourceExponent, int targetExponent) {
@@ -83,10 +70,6 @@ void normalizePerturbation(inout float x, inout float y, inout int exponent) {
 	x *= scale;
 	y *= scale;
 	exponent += shift;
-}
-
-vec2 cmul(vec2 a, vec2 b) {
-	return vec2(a.x * b.x - a.y * b.y, a.x * b.y + b.x * a.y);
 }
 
 void rescaleDerivative(inout vec2 derivative, inout float logOffset) {
@@ -119,94 +102,7 @@ vec4 getVisualPrefix(int i) {
 	int col = i - row * ORBIT_TEXTURE_SIZE;
 	return texelFetch(u_visualPrefixTexture, ivec2(col, row), 0);
 }
-
-float smoothEscape(int iteration, float magnitude) {
-	float logMag = log(magnitude);
-	float logEscapeRadius = u_stripeAverage == 1 ? log(max(u_escapeRadius, STRIPE_AVERAGE_ESCAPE_RADIUS)) : u_logEscapeRadius;
-	float logRatio = logMag / max(logEscapeRadius, 1e-6);
-	float nu = log2(logRatio);
-	return float(iteration) + 1.0 - nu;
-}
-
-float stripeAverageAddend(vec2 z) {
-	return 0.5 + 0.5 * sin(STRIPE_AVERAGE_DENSITY * atan(z.y, z.x));
-}
-
-// See fractal.frag::stripePaletteOffset.
-float stripePaletteOffset(float stripeTotal, float lastStripeValue, int stripeSamples, float magnitudeSq) {
-	if (u_stripeAverage != 1 || stripeSamples <= 0) return 0.0;
-	float stripeAverageValue = stripeTotal / float(stripeSamples);
-	if (stripeSamples == 1 || !isFiniteFloat(magnitudeSq) || magnitudeSq <= 1.000001) {
-		return stripeAverageValue * STRIPE_AVERAGE_COLOR_SCALE;
-	}
-	float previousAverage = (stripeTotal - lastStripeValue) / float(stripeSamples - 1);
-	float bailout = max(u_escapeRadius, STRIPE_AVERAGE_ESCAPE_RADIUS);
-	float frac = 1.0 + log2(log(bailout * bailout) / max(log(magnitudeSq), 1e-6));
-	float mixedAverage = mix(previousAverage, stripeAverageValue, clamp(frac, 0.0, 1.0));
-	return mixedAverage * STRIPE_AVERAGE_COLOR_SCALE;
-}
-
-float getSlopeNormalAngle(vec2 z, vec2 dz) {
-	vec2 n = vec2(z.x * dz.x + z.y * dz.y, z.y * dz.x - z.x * dz.y);
-	float len = length(n);
-	if (!isFiniteFloat(len) || len < 1e-20) return NO_NORMAL_ANGLE;
-	n /= len;
-	float angle = atan(n.y, n.x);
-	return angle < 0.0 ? angle + TAU : angle;
-}
-
-float packVisualMetric(float detailBrightness, float normalAngle) {
-	float detailBin = floor(clamp(detailBrightness, 0.0, 3.999) * METRIC_PACK_DETAIL_SCALE + 0.5);
-	float normalBin = METRIC_PACK_NORMAL_SENTINEL;
-	if (normalAngle >= 0.0) {
-		normalBin = floor(clamp(normalAngle / TAU, 0.0, 1.0) * METRIC_PACK_NORMAL_BINS + 0.5);
-	}
-	return detailBin * METRIC_PACK_COMPONENT_SCALE + normalBin;
-}
-
-// See fractal.frag::interiorMetric.
-vec4 interiorMetric() {
-	return vec4(0.0, 0.0, packVisualMetric(1.0, NO_NORMAL_ANGLE), float(u_stripeAverage));
-}
-
-vec2 distanceEstimateMetrics(vec2 z, vec2 dz, float dzLogOffset, float logViewRadius) {
-	// boundarySignal comes from the Milnor distance estimate; coverage is always 1 since
-	// the caller only invokes this for escaped pixels (in deep zoom the distance falls
-	// far below a pixel and would otherwise blend toward the interior colour).
-	float mag = length(z);
-	float dzMantissaMag = length(dz);
-	if (!isFiniteFloat(mag) || !isFiniteFloat(dzMantissaMag) || mag <= 1.0 || dzMantissaMag <= 1e-20) {
-		return vec2(0.0, 1.0);
-	}
-	float logDerivativeMag = log(dzMantissaMag) + dzLogOffset;
-	float logDistance = log(0.5 * mag * max(log(mag), 1e-6)) - logDerivativeMag;
-	float screenDistance = exp(clamp(logDistance - logViewRadius, -30.0, 30.0));
-	if (!isFiniteFloat(screenDistance)) return vec2(0.0, 1.0);
-	float boundarySignal = clamp(1.0 - smoothstep(0.003, 0.12, screenDistance), 0.0, 1.0);
-	return vec2(boundarySignal, 1.0);
-}
-
-vec4 buildDistanceMetric(
-	float smoothIters,
-	vec2 z,
-	vec2 dz,
-	float dzLogOffset,
-	float stripeTotal,
-	float lastStripeValue,
-	int detailSamples,
-	float logViewRadius
-) {
-	float detailWeight = smoothstep(4.0, 32.0, float(detailSamples));
-	vec2 deMetrics = distanceEstimateMetrics(z, dz, dzLogOffset, logViewRadius);
-	float boundarySignal = deMetrics.x;
-	float coverage = deMetrics.y;
-	float detailBrightness = mix(1.0, 1.16, boundarySignal * detailWeight);
-	float normalAngle = getSlopeNormalAngle(z, dz);
-	float stripeOffset = stripePaletteOffset(stripeTotal, lastStripeValue, detailSamples, dot(z, z));
-	float finalCoverage = max(coverage, float(u_stripeAverage));
-	return vec4(smoothIters, stripeOffset, packVisualMetric(detailBrightness, normalAngle), finalCoverage);
-}
-
+${GLSL_METRIC_SHARED}
 void main() {
 	// Branchless aspect-ratio handling: one axis is unit-1, the other extends to the aspect ratio.
 	vec2 pixelScale = u_resolution / min(u_resolution.x, u_resolution.y);
@@ -405,8 +301,8 @@ void main() {
 		float escapeRadius = u_stripeAverage == 1 ? max(u_escapeRadius, STRIPE_AVERAGE_ESCAPE_RADIUS) : u_escapeRadius;
 		if (magnitudeSq > escapeRadius * escapeRadius) {
 			// j was incremented at the top of the loop body; pass j-1 so this matches
-			// fractal.frag (which passes its pre-increment loop index) and the palette
-			// doesn't shift one band at the standard/deep handoff.
+			// the standard shader (which passes its pre-increment loop index) and the
+			// palette doesn't shift one band at the standard/deep handoff.
 			smoothIters = smoothEscape(j - 1, sqrt(magnitudeSq));
 			escaped = true;
 			orbitCurrent = orbitNext;
@@ -452,7 +348,8 @@ void main() {
 			stripeTotal,
 			lastStripeValue,
 			detailSamples,
-			logViewRadius
+			logViewRadius,
+			-1.0
 		);
 	} else {
 		FragColor = interiorMetric();

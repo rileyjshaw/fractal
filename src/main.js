@@ -5,21 +5,26 @@ import { Tween, Easing } from '@tweenjs/tween.js';
 import { registerSW } from 'virtual:pwa-register';
 
 import palettes, { paletteIds } from './palettes.js';
-import { debounce, hexToNormalizedRGB, identity, parseNumber, updateHash } from './util.js';
+import { debounce, hexToNormalizedRGB, identity, parseNumber, srgbToLinear, updateHash } from './util.js';
+import { getUrlCenterFractionDigits, serializeStateValueForHash } from './urlHash.js';
+import {
+	getApproximatePositionFromCenterComponent,
+	getApproximateZoomScale,
+	getRadiusExactForZoom,
+} from './viewMath.js';
 import handleTouch from './touch.js';
 import { DeepZoomManager } from './deepZoom.js';
 import { generateDeepDisplayShader } from './deepDisplayShader.js';
 import { generatePerturbationShader } from './perturbationShader.js';
+import { generateStandardShader } from './standardShader.js';
+import { N_COLORS } from './shaderCommon.js';
 import * as profiler from './profiler.js';
 
 // Auto-update the service worker.
 registerSW({ immediate: true });
 
-import fragmentSource from './fractal.frag';
-
 import './style.css';
 
-const N_COLORS = 32;
 const MIN_ZOOM = 1;
 const STANDARD_RENDER_SAFE_MAX_ZOOM = 1e12;
 const MAX_ZOOM_DECIMAL_EXPONENT = 400;
@@ -77,7 +82,6 @@ const DEEP_INTERACTION_MOTION_SETTLE_MS = 200;
 // Half of non-retina resolution — quartering the linear density on a 2x retina, so
 // the iteration shader does ~16x less work per frame during zoom/pan.
 const INTERACTION_MOTION_RESOLUTION_MULTIPLIER = 0.5;
-const URL_CENTER_GUARD_DECIMAL_DIGITS = 6;
 const SHOW_ZOOM_MODE_NOTICES = import.meta.env.DEV;
 
 const ORBIT_TEXTURE_OPTIONS = {
@@ -348,79 +352,6 @@ const [state, shortKeys, stateParsers] = Object.entries({
 );
 const defaultState = { ...state };
 
-function getApproximatePositionFromCenterComponent(centerComponent) {
-	const numericValue = Number(centerComponent);
-	return Number.isFinite(numericValue) ? numericValue / 2 : null;
-}
-
-function incrementDigitString(value) {
-	const digits = value.split('');
-	let carry = 1;
-	for (let i = digits.length - 1; i >= 0 && carry; i--) {
-		const nextDigit = digits[i].charCodeAt(0) - 48 + carry;
-		digits[i] = String(nextDigit % 10);
-		carry = nextDigit >= 10 ? 1 : 0;
-	}
-	if (carry) digits.unshift('1');
-	return digits.join('');
-}
-
-function normalizeDecimalString(sign, integerPart, fractionalPart) {
-	const normalizedInteger = integerPart.replace(/^0+(?=\d)/, '') || '0';
-	const normalizedFraction = fractionalPart.replace(/0+$/, '');
-	if (normalizedInteger === '0' && normalizedFraction === '') return '0';
-	return `${sign}${normalizedInteger}${normalizedFraction ? `.${normalizedFraction}` : ''}`;
-}
-
-function roundPlainDecimalStringToFractionDigits(value, fractionDigits) {
-	const input = String(value).trim();
-	if (input === '' || input.includes('e') || input.includes('E')) return value;
-
-	const sign = input[0] === '-' || input[0] === '+' ? input[0] : '';
-	const unsignedInput = sign ? input.slice(1) : input;
-	const decimalIndex = unsignedInput.indexOf('.');
-	if (decimalIndex === -1) return normalizeDecimalString(sign === '-' ? '-' : '', unsignedInput, '');
-
-	let integerPart = unsignedInput.slice(0, decimalIndex) || '0';
-	const fractionalPart = unsignedInput.slice(decimalIndex + 1);
-	if (fractionalPart.length <= fractionDigits) {
-		return normalizeDecimalString(sign === '-' ? '-' : '', integerPart, fractionalPart);
-	}
-
-	let roundedFraction = fractionalPart.slice(0, fractionDigits);
-	if (fractionalPart.charCodeAt(fractionDigits) >= 53) {
-		if (fractionDigits === 0) {
-			integerPart = incrementDigitString(integerPart);
-		} else {
-			const incrementedFraction = incrementDigitString(roundedFraction);
-			if (incrementedFraction.length > fractionDigits) {
-				integerPart = incrementDigitString(integerPart);
-				roundedFraction = '0'.repeat(fractionDigits);
-			} else {
-				roundedFraction = incrementedFraction.padStart(fractionDigits, '0');
-			}
-		}
-	}
-
-	return normalizeDecimalString(sign === '-' ? '-' : '', integerPart, roundedFraction);
-}
-
-function getUrlCenterFractionDigits(zoom) {
-	if (!Number.isFinite(zoom)) return 17;
-	const radiusDecimalDigits = Math.max(0, Math.ceil((zoom - 1) * Math.log10(2)));
-	return radiusDecimalDigits + URL_CENTER_GUARD_DECIMAL_DIGITS;
-}
-
-function serializeStateValueForHash(key, value, urlCenterFractionDigits) {
-	switch (key) {
-		case 'deepCenterReal':
-		case 'deepCenterImag':
-			return roundPlainDecimalStringToFractionDigits(value, urlCenterFractionDigits);
-		default:
-			return value;
-	}
-}
-
 function syncApproximateCenterFromPreciseState({ syncSmoothed = false } = {}) {
 	const approximateX = getApproximatePositionFromCenterComponent(state.deepCenterReal);
 	const approximateY = getApproximatePositionFromCenterComponent(state.deepCenterImag);
@@ -437,29 +368,6 @@ function syncApproximateCenterFromPreciseState({ syncSmoothed = false } = {}) {
 function syncPreciseCenterFromApproximateState() {
 	state.deepCenterReal = (state.xPosition * 2).toString();
 	state.deepCenterImag = (state.yPosition * 2).toString();
-}
-
-function getRadiusExactForZoom(zoom) {
-	if (!Number.isFinite(zoom)) {
-		return zoom > 0 ? '0' : '2';
-	}
-
-	const log10Radius = (1 - zoom) * Math.log10(2);
-	if (log10Radius > -307 && log10Radius < 307) {
-		const radius = Math.pow(2, 1 - zoom);
-		if (Number.isFinite(radius) && radius > 0) {
-			return radius.toString();
-		}
-	}
-
-	const decimalExponent = Math.floor(log10Radius);
-	const decimalMantissa = Math.pow(10, log10Radius - decimalExponent);
-	return `${decimalMantissa.toPrecision(17)}e${decimalExponent}`;
-}
-
-function getApproximateZoomScale(zoom) {
-	const zoomScale = Math.pow(2, zoom);
-	return Number.isFinite(zoomScale) ? zoomScale : Number.MAX_VALUE;
 }
 
 function getCurrentRadiusExact() {
@@ -723,12 +631,6 @@ function buildPaletteTextureSource() {
 	return { data, width: N_COLORS, height: 1 };
 }
 
-// sRGB → linear (IEC 61966-2-1). Matches the GPU's SRGB8_ALPHA8 decode, so
-// the inside color mixes correctly against the palette in linear space.
-function srgbToLinear(c) {
-	return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
-}
-
 // Inside color (used when metric.w is low): 50/50 mix of palette[0] and
 // palette[1] in linear space at 18% brightness. Uploaded as a linear-space
 // uniform so the display shader can mix it directly with the linear palette
@@ -897,7 +799,7 @@ function initializeStandardIterationUniforms(renderState) {
 
 function ensureStandardIterationRenderer(renderState) {
 	if (standardIterationRenderer) return;
-	standardIterationRenderer = new ShaderPad(fragmentSource, {
+	standardIterationRenderer = new ShaderPad(generateStandardShader(), {
 		...getShaderPadOptions(),
 		...METRIC_TEXTURE_OPTIONS,
 	});

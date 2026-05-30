@@ -10,6 +10,12 @@ export function hexToNormalizedRGB(hex) {
 	return [r, g, b];
 }
 
+// sRGB → linear (IEC 61966-2-1). Matches the GPU's SRGB8_ALPHA8 decode, so colors mixed on
+// the CPU side blend correctly against the linear palette.
+export function srgbToLinear(c) {
+	return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+}
+
 // Shuffle an array in place.
 export function shuffleArray(array) {
 	if (array.length <= 1) return;

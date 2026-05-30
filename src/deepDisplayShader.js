@@ -1,8 +1,10 @@
+import { GLSL_IS_FINITE, GLSL_PACK_CONSTANTS, N_COLORS } from './shaderCommon.js';
+
 export function generateDeepDisplayShader() {
 	return `#version 300 es
 precision highp float;
 
-#define N_COLORS 32
+#define N_COLORS ${N_COLORS}
 
 in vec2 v_uv;
 
@@ -24,13 +26,8 @@ out vec4 outColor;
 
 // Bumped above 1 if more headroom is needed; tone map handles roll-off.
 const float EXPOSURE = 1.0;
-const float TAU = 6.283185307179586;
-const float METRIC_PACK_COMPONENT_SCALE = 4096.0;
-const float METRIC_PACK_DETAIL_SCALE = 1024.0;
-const float METRIC_PACK_NORMAL_BINS = 4094.0;
-const float METRIC_PACK_NORMAL_SENTINEL = 4095.0;
-const float METRIC_PACK_MAX = 16777215.0;
-
+${GLSL_PACK_CONSTANTS}const float METRIC_PACK_MAX = 16777215.0;
+${GLSL_IS_FINITE}
 struct VisualMetric {
 	float detailBrightness;
 	float normalAngle;
@@ -52,10 +49,6 @@ vec3 linearToSrgb(vec3 c) {
 	vec3 higher = 1.055 * pow(max(c, vec3(0.0)), vec3(1.0 / 2.4)) - 0.055;
 	vec3 lower = c * 12.92;
 	return mix(higher, lower, cutoff);
-}
-
-bool isFiniteFloat(float value) {
-	return value == value && abs(value) < 3.0e38;
 }
 
 vec4 sanitizeMetric(vec4 metric) {

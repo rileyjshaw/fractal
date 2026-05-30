@@ -1,10 +1,15 @@
-#version 300 es
+import { GLSL_IS_FINITE, GLSL_METRIC_SHARED, GLSL_PACK_CONSTANTS, N_COLORS } from './shaderCommon.js';
+
+export function generateStandardShader() {
+	return `#version 300 es
 precision highp float;
 
-// Iteration pass: outputs the per-pixel metric (smoothIters, stripeOffset,
+// Standard iteration pass: outputs the per-pixel metric (smoothIters, stripeOffset,
 // packed visual data, coverage) to an FBO. The downstream display shader
-// (deepDisplayShader.js) reads this metric and applies the palette/lighting.
-// Palette and lighting changes only re-run the cheap display pass.
+// (deepDisplayShader.js) reads this metric and applies the palette/lighting, so palette
+// and lighting changes only re-run the cheap display pass.
+#define N_COLORS ${N_COLORS}
+
 uniform vec2 u_resolution;
 uniform vec2 u_center;
 uniform float u_zoom;
@@ -18,22 +23,7 @@ uniform float u_logEscapeRadius;
 uniform int u_stripeAverage;
 
 out vec4 FragColor;
-
-const float STRIPE_AVERAGE_DENSITY = 8.0;
-// Must match STRIPE_AVERAGE_COLOR_SCALE in deepDisplayShader.js (= N_COLORS there).
-const float STRIPE_AVERAGE_COLOR_SCALE = 32.0;
-const float STRIPE_AVERAGE_ESCAPE_RADIUS = 64.0;
-const float TAU = 6.283185307179586;
-const float METRIC_PACK_COMPONENT_SCALE = 4096.0;
-const float METRIC_PACK_DETAIL_SCALE = 1024.0;
-const float METRIC_PACK_NORMAL_BINS = 4094.0;
-const float METRIC_PACK_NORMAL_SENTINEL = 4095.0;
-const float NO_NORMAL_ANGLE = -1.0;
-
-vec2 cmul(vec2 a, vec2 b) {
-	return vec2(a.x * b.x - a.y * b.y, a.x * b.y + b.x * a.y);
-}
-
+${GLSL_PACK_CONSTANTS}${GLSL_IS_FINITE}${GLSL_METRIC_SHARED}
 vec2 cpow(vec2 z, int n) {
 	vec2 sum = z;
 	for (int i = 0; i < n - 1; i++) {
@@ -42,89 +32,12 @@ vec2 cpow(vec2 z, int n) {
 	return sum;
 }
 
-bool isFiniteFloat(float value) {
-	// GLSL's isnan/isinf are unreliable under fast-math; check magnitude directly.
-	return value == value && abs(value) < 3.0e38;
-}
-
-float smoothEscape(int iteration, float mag) {
-	float logMag = log(mag);
-	float logEscapeRadius =
-		u_stripeAverage == 1
-			? log(max(u_escapeRadius, STRIPE_AVERAGE_ESCAPE_RADIUS))
-			: u_logEscapeRadius;
-	float logRatio = logMag / max(logEscapeRadius, 1e-6);
-	float nu = log2(logRatio);
-	return float(iteration) + 1.0 - nu;
-}
-
 float orbitDetailValue(vec2 z) {
 	return 1.0 / (1.0 + dot(z, z));
 }
 
-float stripeAverageAddend(vec2 z) {
-	return 0.5 + 0.5 * sin(STRIPE_AVERAGE_DENSITY * atan(z.y, z.x));
-}
-
-// Continuous stripe average: average the addend across the orbit, then blend against the
-// previous sample's average via the same fractional-iteration factor smoothEscape uses,
-// so the result is continuous across the escape boundary. Returns a palette-index offset.
-float stripePaletteOffset(float stripeTotal, float lastStripeValue, int stripeSamples, float magnitudeSq) {
-	if (u_stripeAverage != 1 || stripeSamples <= 0) return 0.0;
-	float stripeAverageValue = stripeTotal / float(stripeSamples);
-	if (stripeSamples == 1 || !isFiniteFloat(magnitudeSq) || magnitudeSq <= 1.000001) {
-		return stripeAverageValue * STRIPE_AVERAGE_COLOR_SCALE;
-	}
-	float previousAverage = (stripeTotal - lastStripeValue) / float(stripeSamples - 1);
-	float bailout = max(u_escapeRadius, STRIPE_AVERAGE_ESCAPE_RADIUS);
-	float frac = 1.0 + log2(log(bailout * bailout) / max(log(magnitudeSq), 1e-6));
-	float mixedAverage = mix(previousAverage, stripeAverageValue, clamp(frac, 0.0, 1.0));
-	return mixedAverage * STRIPE_AVERAGE_COLOR_SCALE;
-}
-
-float getSlopeNormalAngle(vec2 z, vec2 dz) {
-	vec2 n = vec2(z.x * dz.x + z.y * dz.y, z.y * dz.x - z.x * dz.y);
-	float len = length(n);
-	if (!isFiniteFloat(len) || len < 1e-20) return NO_NORMAL_ANGLE;
-	n /= len;
-	float angle = atan(n.y, n.x);
-	return angle < 0.0
-		? angle + TAU
-		: angle;
-}
-
-float packVisualMetric(float detailBrightness, float normalAngle) {
-	float detailBin = floor(clamp(detailBrightness, 0.0, 3.999) * METRIC_PACK_DETAIL_SCALE + 0.5);
-	float normalBin = METRIC_PACK_NORMAL_SENTINEL;
-	if (normalAngle >= 0.0) {
-		normalBin = floor(clamp(normalAngle / TAU, 0.0, 1.0) * METRIC_PACK_NORMAL_BINS + 0.5);
-	}
-	return detailBin * METRIC_PACK_COMPONENT_SCALE + normalBin;
-}
-
-vec2 distanceEstimateMetrics(vec2 z, vec2 dz, float logViewRadius, float pixelRadius) {
-	// Returns (boundarySignal, coverage):
-	//   boundarySignal: wide [0, 1] ramp peaking at the set boundary, drives palette shifts.
-	//   coverage: narrow sub-pixel ramp, 0 on boundary, 1 a couple pixels out, drives AA.
-	float mag = length(z);
-	float derivativeMag = length(dz);
-	if (!isFiniteFloat(mag) || !isFiniteFloat(derivativeMag) || mag <= 1.0 || derivativeMag <= 1e-20) {
-		return vec2(0.0, 1.0);
-	}
-	float logDistance = log(0.5 * mag * max(log(mag), 1e-6)) - log(derivativeMag);
-	float screenDistance = exp(clamp(logDistance - logViewRadius, -30.0, 30.0));
-	if (!isFiniteFloat(screenDistance)) return vec2(0.0, 1.0);
-	float boundarySignal = clamp(1.0 - smoothstep(0.003, 0.12, screenDistance), 0.0, 1.0);
-	float coverage = smoothstep(0.0, pixelRadius * 2.0, screenDistance);
-	return vec2(boundarySignal, coverage);
-}
-
-// Metric layout (consumed by getPaletteColor):
-//   .x = smooth iteration count
-//   .y = palette-index offset (stripe contribution, 0 when stripe is off)
-//   .z = packed visual data (detail brightness + optional slope normal angle)
-//   .w = coverage; stripe mode forces this to 1 so the stripe pattern paints
-//        the M-set interior as well.
+// Metric for escaped pixels of the non-quadratic / folded formulas, which don't carry a
+// derivative for the distance estimate. Detail brightness comes from the orbit average.
 vec4 buildMetric(
 	float smoothIters,
 	float detailTotal,
@@ -140,36 +53,6 @@ vec4 buildMetric(
 	float stripeOffset = stripePaletteOffset(stripeTotal, lastStripeValue, detailSamples, magnitudeSq);
 	float finalCoverage = max(coverage, float(u_stripeAverage));
 	return vec4(smoothIters, stripeOffset, packVisualMetric(detailBrightness, NO_NORMAL_ANGLE), finalCoverage);
-}
-
-// Stable metric for non-escaping (interior) pixels. With stripe averaging off,
-// coverage=0 routes the display to insideColor and the iteration count is unused.
-// With stripe on, coverage is forced to 1 and the palette is sampled at offset 0
-// so the interior renders a single, zoom-independent color instead of drifting as
-// u_iterations grows and the orbit sum keeps accumulating.
-vec4 interiorMetric() {
-	return vec4(0.0, 0.0, packVisualMetric(1.0, NO_NORMAL_ANGLE), float(u_stripeAverage));
-}
-
-vec4 buildDistanceMetric(
-	float smoothIters,
-	vec2 z,
-	vec2 dz,
-	float stripeTotal,
-	float lastStripeValue,
-	int detailSamples,
-	float logViewRadius,
-	float pixelRadius
-) {
-	float detailWeight = smoothstep(4.0, 32.0, float(detailSamples));
-	vec2 deMetrics = distanceEstimateMetrics(z, dz, logViewRadius, pixelRadius);
-	float boundarySignal = deMetrics.x;
-	float coverage = deMetrics.y;
-	float detailBrightness = mix(1.0, 1.16, boundarySignal * detailWeight);
-	float normalAngle = getSlopeNormalAngle(z, dz);
-	float stripeOffset = stripePaletteOffset(stripeTotal, lastStripeValue, detailSamples, dot(z, z));
-	float finalCoverage = max(coverage, float(u_stripeAverage));
-	return vec4(smoothIters, stripeOffset, packVisualMetric(detailBrightness, normalAngle), finalCoverage);
 }
 
 bool inMandelbrotInterior(vec2 c) {
@@ -211,6 +94,7 @@ vec4 iterateJulia(vec2 coord, vec2 c, float pixelRadius) {
 					smoothEscape(i, mag),
 					z,
 					dz,
+					0.0,
 					stripeTotal,
 					lastStripeValue,
 					detailSamples,
@@ -263,6 +147,7 @@ vec4 iterateMandelbrot(vec2 coord, float pixelRadius) {
 					smoothEscape(i, mag),
 					z,
 					dz,
+					0.0,
 					stripeTotal,
 					lastStripeValue,
 					detailSamples,
@@ -367,4 +252,6 @@ void main() {
 	}
 
 	FragColor = metric;
+}
+`;
 }

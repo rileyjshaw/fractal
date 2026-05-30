@@ -1,5 +1,4 @@
 import { defineConfig } from 'vite';
-import glsl from 'vite-plugin-glsl';
 import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig({
@@ -11,7 +10,6 @@ export default defineConfig({
 	},
 	base: '/fractal/',
 	plugins: [
-		glsl(),
 		VitePWA({
 			workbox: {
 				globPatterns: ['**/*'],
