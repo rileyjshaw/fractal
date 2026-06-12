@@ -4,7 +4,7 @@ This project lets you zoom into, modify, and explore several fractal formulas in
 
 This project is just for fun and learning. Pull requests are welcome as long as the app stays performant and fun to explore.
 
-![Example program output](/screenshots/julia.png)
+![Example program output](/screenshots/fractal-1080p.jpg)
 
 ## Features
 
