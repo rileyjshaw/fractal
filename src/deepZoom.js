@@ -15,8 +15,25 @@ import {
 
 const FRACTAL_TYPE_JULIA = 0;
 const FRACTAL_TYPE_MANDELBROT = 1;
-const SUPPORTED_FRACTAL_TYPES = new Set([FRACTAL_TYPE_JULIA, FRACTAL_TYPE_MANDELBROT]);
-const SUPPORTED_EXPONENTS = new Set([2]); // Quadratic only for now.
+const FRACTAL_TYPE_BURNING_SHIP = 2;
+const FRACTAL_TYPE_MANDALA = 3;
+const SUPPORTED_FRACTAL_TYPES = new Set([
+	FRACTAL_TYPE_JULIA,
+	FRACTAL_TYPE_MANDELBROT,
+	FRACTAL_TYPE_BURNING_SHIP,
+	FRACTAL_TYPE_MANDALA,
+]);
+// Holomorphic formulas: Newton periodic-point search and BLA chunk skipping both rely on
+// the complex derivative, so the folded fractals (Burning Ship / Mandala) are excluded
+// and run scalar perturbation from grid-sampled references instead.
+const ANALYTIC_FRACTAL_TYPES = new Set([FRACTAL_TYPE_JULIA, FRACTAL_TYPE_MANDELBROT]);
+// Formulas whose orbit depends on the (cReal, cImaginary) constant; their reference
+// signatures must include it.
+const CONSTANT_FRACTAL_TYPES = new Set([FRACTAL_TYPE_JULIA, FRACTAL_TYPE_MANDALA]);
+// Matches main.js MIN_EXPONENT/MAX_EXPONENT. The perturbation shader unrolls the
+// binomial delta recurrence per exponent; 16 keeps every C(N,k) exact in float32.
+const MIN_SUPPORTED_EXPONENT = 2;
+const MAX_SUPPORTED_EXPONENT = 16;
 // When the requested center's reference orbit escapes before reaching this fraction
 // of u_iterations, sample nearby centers and pick one with a longer orbit. Short
 // orbits leave the perturbation shader's loop terminating at k>=orbitLength-1, so
@@ -129,13 +146,24 @@ export class DeepZoomManager {
 		if (!SUPPORTED_FRACTAL_TYPES.has(state.fractalType)) {
 			return {
 				supported: false,
-				reason: 'Deep zoom currently supports Julia and Mandelbrot only; folded fractals need their own perturbation path',
+				reason: 'Deep zoom does not support this fractal type yet',
 			};
 		}
-		if (!SUPPORTED_EXPONENTS.has(state.exponent)) {
-			return { supported: false, reason: 'Deep zoom currently supports exponent 2 only' };
+		if (
+			!Number.isInteger(state.exponent) ||
+			state.exponent < MIN_SUPPORTED_EXPONENT ||
+			state.exponent > MAX_SUPPORTED_EXPONENT
+		) {
+			return {
+				supported: false,
+				reason: `Deep zoom supports integer exponents ${MIN_SUPPORTED_EXPONENT}-${MAX_SUPPORTED_EXPONENT} only`,
+			};
 		}
 		return { supported: true, reason: null };
+	}
+
+	usesQuadraticAnalyticAcceleration(state) {
+		return ANALYTIC_FRACTAL_TYPES.has(state.fractalType) && state.exponent === 2;
 	}
 
 	invalidate() {
@@ -161,8 +189,9 @@ export class DeepZoomManager {
 		// Keep radius in the identity so zoom-driven recenter requests cannot be
 		// short-circuited by an older shifted reference for the same view center.
 		const radius = state.radiusExact ?? state.radius;
-		const constantReal = state.fractalType === FRACTAL_TYPE_JULIA ? Number(state.cReal).toPrecision(12) : '';
-		const constantImag = state.fractalType === FRACTAL_TYPE_JULIA ? Number(state.cImaginary).toPrecision(12) : '';
+		const usesConstant = CONSTANT_FRACTAL_TYPES.has(state.fractalType);
+		const constantReal = usesConstant ? Number(state.cReal).toPrecision(12) : '';
+		const constantImag = usesConstant ? Number(state.cImaginary).toPrecision(12) : '';
 		return [
 			centerReal,
 			centerImag,
@@ -176,8 +205,9 @@ export class DeepZoomManager {
 	}
 
 	getReferenceCompatibilitySignature(state) {
-		const constantReal = state.fractalType === FRACTAL_TYPE_JULIA ? Number(state.cReal).toPrecision(12) : '';
-		const constantImag = state.fractalType === FRACTAL_TYPE_JULIA ? Number(state.cImaginary).toPrecision(12) : '';
+		const usesConstant = CONSTANT_FRACTAL_TYPES.has(state.fractalType);
+		const constantReal = usesConstant ? Number(state.cReal).toPrecision(12) : '';
+		const constantImag = usesConstant ? Number(state.cImaginary).toPrecision(12) : '';
 		return [state.fractalType, state.exponent, constantReal, constantImag].join('|');
 	}
 
@@ -263,12 +293,6 @@ export class DeepZoomManager {
 
 	// Bivariate Linear Approximation (BLA): a hierarchy of precomputed linear
 	// coefficients. Level 0 skips 32 steps; each higher level doubles that span.
-	// The shader tries larger levels first and falls back to scalar perturbation
-	// when the stored validity radius rejects a pixel.
-	buildBLATable(orbit) {
-		return buildHierarchicalBLATable(orbit);
-	}
-
 	getBLATextureSource() {
 		if (!this.blaTableData) return null;
 		return {
@@ -304,31 +328,34 @@ export class DeepZoomManager {
 		// Deterministically converge to a periodic point near the requested center.
 		// Periodic points have provably non-escaping orbits, so orbitLength always
 		// reaches targetIterations and no pixel falls through the shader's iteration
-		// cap. This is the only way to fix the "small pan → minibrot disappears"
-		// class of bug — grid sampling is inherently lucky/unlucky depending on
-		// whether a sample lands inside a small minibrot. Works for both Mandelbrot
+		// cap. Works for both Mandelbrot
 		// (solve f^p_c(0) = 0 in c) and Julia (solve f^p_c(z) = z in z, with c fixed
 		// at the user's parameter).
-		const newtonCenter = await profiler.measureAsync('ref:newton.search', () =>
-			this.gmp.findPeriodicReferenceCenter(
-				centerReal,
-				centerImag,
-				// The Newton-found center must stay within the recenter envelope or it
-				// would immediately re-trigger a recompute. Bound at NEWTON_MAX_OFFSET_RADII
-				// view radii — well under DEEP_REFERENCE_RECENTER_OFFSET so the chosen
-				// center won't immediately re-trigger a recenter.
-				this.gmp.scaleValue(radius, NEWTON_MAX_OFFSET_RADII),
-				{
-					fractalType: options.fractalType,
-					cReal: options.cReal,
-					cImaginary: options.cImaginary,
-					// Bail mid-Newton if a newer recompute has been requested (user kept
-					// panning). Avoids burning ~1s of MPFR work on a result that will be discarded.
-					isAborted: () => requestId !== this.referenceRequestId,
-				},
-			),
-		);
-		if (newtonCenter && requestId === this.referenceRequestId) {
+		const newtonCenter =
+			ANALYTIC_FRACTAL_TYPES.has(options.fractalType) && options.exponent === 2
+				? await profiler.measureAsync('ref:newton.search', () =>
+						this.gmp.findPeriodicReferenceCenter(
+							centerReal,
+							centerImag,
+							// The Newton-found center must stay within the recenter envelope or it
+							// would immediately re-trigger a recompute. Bound at NEWTON_MAX_OFFSET_RADII
+							// view radii — well under DEEP_REFERENCE_RECENTER_OFFSET so the chosen
+							// center won't immediately re-trigger a recenter.
+							this.gmp.scaleValue(radius, NEWTON_MAX_OFFSET_RADII),
+							{
+								fractalType: options.fractalType,
+								exponent: options.exponent,
+								cReal: options.cReal,
+								cImaginary: options.cImaginary,
+								// Bail mid-Newton if a newer recompute has been requested (user kept
+								// panning). Avoids burning ~1s of MPFR work on a result that will be discarded.
+								isAborted: () => requestId !== this.referenceRequestId,
+							},
+						),
+					)
+				: null;
+		if (requestId !== this.referenceRequestId) return null;
+		if (newtonCenter) {
 			profiler.note('ref:newton.period', newtonCenter.period);
 			const finalResult = profiler.measure('ref:newton.computeFinalOrbit', () =>
 				this.gmp.computeReferenceData(
@@ -369,7 +396,7 @@ export class DeepZoomManager {
 			return bestOrbitLength >= acceptableOrbitLength;
 		};
 
-		if (!trySample(centerReal, centerImag) && requestId === this.referenceRequestId) {
+		if (!trySample(centerReal, centerImag)) {
 			for (const [offsetReal, offsetImag] of REFERENCE_SAMPLE_OFFSETS) {
 				// Yield so the render loop and input handlers stay responsive; each
 				// computeReferenceData at deep zoom can take tens of ms.
@@ -380,6 +407,8 @@ export class DeepZoomManager {
 				if (trySample(offset.centerReal, offset.centerImag)) break;
 			}
 		}
+
+		if (requestId !== this.referenceRequestId) return null;
 
 		profiler.note('ref:sample.bestOrbitLength', bestOrbitLength);
 		const finalResult = profiler.measure('ref:sample.computeFinalOrbit', () =>
@@ -418,6 +447,7 @@ export class DeepZoomManager {
 					state.deepIterations ?? state.iterations,
 					{
 						fractalType: state.fractalType,
+						exponent: state.exponent,
 						cReal: state.cReal,
 						cImaginary: state.cImaginary,
 					},
@@ -425,7 +455,7 @@ export class DeepZoomManager {
 				),
 			)
 			.then(referenceData => {
-				if (requestId !== this.referenceRequestId) {
+				if (!referenceData || requestId !== this.referenceRequestId) {
 					return this.orbitTextureData;
 				}
 
@@ -445,15 +475,20 @@ export class DeepZoomManager {
 				this.orbitTextureData = profiler.measure('ref:buildOrbitTexture', () =>
 					this.buildOrbitTextureData(referenceData.orbit),
 				);
-				this.visualPrefixTextureData = profiler.measure('ref:buildVisualPrefixTexture', () =>
-					buildVisualPrefixTextureData(referenceData.orbit),
-				);
-				this.blaTableData = profiler.measure('ref:buildBLAHierarchy', () =>
-					this.buildBLATable(referenceData.orbit),
-				);
-				profiler.note('ref:blaLevels', BLA_MAX_LEVELS);
-				profiler.note('ref:blaTextureMB', (BLA_TEXTURE_LENGTH * 4) / (1024 * 1024));
-				profiler.note('ref:visualPrefixTextureMB', (ORBIT_TEXTURE_LENGTH * 4) / (1024 * 1024));
+				if (this.usesQuadraticAnalyticAcceleration(state)) {
+					this.visualPrefixTextureData = profiler.measure('ref:buildVisualPrefixTexture', () =>
+						buildVisualPrefixTextureData(referenceData.orbit),
+					);
+					this.blaTableData = profiler.measure('ref:buildBLAHierarchy', () =>
+						buildHierarchicalBLATable(referenceData.orbit),
+					);
+					profiler.note('ref:blaLevels', BLA_MAX_LEVELS);
+					profiler.note('ref:blaTextureMB', (BLA_TEXTURE_LENGTH * 4) / (1024 * 1024));
+					profiler.note('ref:visualPrefixTextureMB', (ORBIT_TEXTURE_LENGTH * 4) / (1024 * 1024));
+				} else {
+					this.visualPrefixTextureData = null;
+					this.blaTableData = null;
+				}
 				this.lastError = null;
 				return this.orbitTextureData;
 			})

@@ -1,3 +1,5 @@
+import { STRIPE_EWMA_ALPHA } from './shaderCommon.js';
+
 export const ORBIT_TEXTURE_SIZE = 1024;
 export const ORBIT_TEXTURE_CHANNELS = 4;
 export const ORBIT_TEXTURE_PIXELS = ORBIT_TEXTURE_SIZE * ORBIT_TEXTURE_SIZE;
@@ -197,8 +199,14 @@ export function buildVisualPrefixTextureData(orbit) {
 	const capacity = Math.min(orbitLength, ORBIT_TEXTURE_PIXELS);
 	const data = new Float32Array(ORBIT_TEXTURE_LENGTH);
 	let detailTotal = 0;
-	let stripeTotal = 0;
+	let stripeEwma = 0.5;
 	let lastStripeValue = 0.5;
+	let minMagSq = 1.0e30;
+	if (capacity > 0) {
+		data[1] = stripeEwma;
+		data[2] = lastStripeValue;
+		data[3] = minMagSq;
+	}
 
 	for (let i = 1; i < capacity; i++) {
 		const src = i * 3;
@@ -207,12 +215,14 @@ export function buildVisualPrefixTextureData(orbit) {
 		const y = orbit[src + 1] * scale;
 		detailTotal += orbitDetailValue(x, y);
 		lastStripeValue = stripeAverageAddend(x, y);
-		stripeTotal += lastStripeValue;
+		stripeEwma += (lastStripeValue - stripeEwma) * STRIPE_EWMA_ALPHA;
+		minMagSq = Math.min(minMagSq, x * x + y * y);
 
 		const dst = i * ORBIT_TEXTURE_CHANNELS;
 		data[dst] = detailTotal;
-		data[dst + 1] = stripeTotal;
+		data[dst + 1] = stripeEwma;
 		data[dst + 2] = lastStripeValue;
+		data[dst + 3] = minMagSq;
 	}
 
 	return data;

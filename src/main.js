@@ -37,7 +37,10 @@ const MAX_RESOLUTION_MULTIPLIER = 2;
 const MIN_ESCAPE_RADIUS = 0.8;
 const MAX_ESCAPE_RADIUS = 2;
 const MIN_COLOR_SCALE = 0.02;
-const MAX_COLOR_SCALE = 1.0;
+// High ceiling so the G key can densify banding at deep zoom, where the per-frame
+// iteration range shrinks and bands go sparse at shallow-zoom-tuned densities.
+// (Automatic compensation — histogram equalization — stays on the TODO list.)
+const MAX_COLOR_SCALE = 8.0;
 const MIN_SLOPE_LIGHT_HEIGHT = 0.1;
 const MAX_SLOPE_LIGHT_HEIGHT = 4;
 const MIN_SLOPE_LIGHT_INTENSITY = 0;
@@ -78,10 +81,10 @@ const DEEP_REFERENCE_ITERATION_HEADROOM_EXPONENT = 12;
 // units of u_iterations growth per recompute.
 const DEEP_REFERENCE_ITERATION_QUANTUM = 4096;
 const DEEP_INTERACTION_MOTION_SETTLE_MS = 200;
-// Absolute pixel density (CSS-pixel multiplier) used while the user is interacting.
-// Half of non-retina resolution — quartering the linear density on a 2x retina, so
-// the iteration shader does ~16x less work per frame during zoom/pan.
-const INTERACTION_MOTION_RESOLUTION_MULTIPLIER = 0.5;
+// Reproject the held metric frame during interaction; refresh once magnification drifts
+// outside these bounds (~3x in either direction).
+const DEEP_PREVIEW_REFRESH_MIN_SCALE = 0.35;
+const DEEP_PREVIEW_REFRESH_MAX_SCALE = 1 / DEEP_PREVIEW_REFRESH_MIN_SCALE;
 const SHOW_ZOOM_MODE_NOTICES = import.meta.env.DEV;
 
 const ORBIT_TEXTURE_OPTIONS = {
@@ -132,7 +135,9 @@ const deepZoomManager = new DeepZoomManager({ threshold: DEEP_ZOOM_THRESHOLD });
 
 let resolutionMultiplier = window.devicePixelRatio || 1;
 let standardIterationRenderer = null;
+let standardIterationVariantKey = null;
 let deepIterationRenderer = null;
+let deepIterationVariantKey = null;
 let displayRenderer = null;
 let lastStandardIterationRenderSignature = null;
 let lastUploadedDeepOrbitSignature = null;
@@ -140,6 +145,8 @@ let lastDeepIterationRenderSignature = null;
 let lastUnsupportedDeepZoomReason = null;
 let lastDeepZoomActive = false;
 let isDeepInteractionInMotion = false;
+let deepMetricAnchor = null;
+let deepPreviewTransformCache = null;
 let colorsVersion = 0;
 let displayRendererColorsVersion = -1;
 let paletteFrame = 0;
@@ -463,6 +470,8 @@ function resetState() {
 	lastStandardIterationRenderSignature = null;
 	lastDeepIterationRenderSignature = null;
 	lastUploadedDeepOrbitSignature = null;
+	deepMetricAnchor = null;
+	deepPreviewTransformCache = null;
 	lastObservedZoom = smoothedZoom[0];
 	settleDeepInteractionMotion.clearTimeout();
 	setDeepInteractionInMotion(false);
@@ -697,15 +706,8 @@ function getCanvasDisplaySize() {
 
 function syncCanvasResolution() {
 	const displaySize = getCanvasDisplaySize();
-	// Drop resolution during deep-zoom motion only — the perturbation shader is
-	// the bottleneck there. Standard mode is GPU-cheap (especially with the
-	// chained iteration/display split below) and doesn't need the trade.
-	const shouldDropForMotion = isDeepInteractionInMotion && isDeepZoomRequested(smoothedZoom[0]);
-	const effectiveMultiplier = shouldDropForMotion
-		? Math.max(MIN_RESOLUTION_MULTIPLIER, Math.min(resolutionMultiplier, INTERACTION_MOTION_RESOLUTION_MULTIPLIER))
-		: resolutionMultiplier;
-	const width = Math.max(1, Math.round(displaySize.width * effectiveMultiplier));
-	const height = Math.max(1, Math.round(displaySize.height * effectiveMultiplier));
+	const width = Math.max(1, Math.round(displaySize.width * resolutionMultiplier));
+	const height = Math.max(1, Math.round(displaySize.height * resolutionMultiplier));
 	if (canvas.width === width && canvas.height === height) return;
 
 	canvas.width = width;
@@ -721,12 +723,12 @@ function syncCanvasResolution() {
 	// rebinds against the freshly recreated metric FBO.
 	lastStandardIterationRenderSignature = null;
 	lastDeepIterationRenderSignature = null;
+	deepMetricAnchor = null;
+	deepPreviewTransformCache = null;
 }
 
 function setDeepInteractionInMotion(isActive) {
-	if (isDeepInteractionInMotion === isActive) return;
 	isDeepInteractionInMotion = isActive;
-	syncCanvasResolution();
 }
 
 const settleDeepInteractionMotion = debounce(() => {
@@ -784,41 +786,67 @@ function updateSlopeLightIntensity(delta) {
 	showInfo(`Light intensity: ${slopeLightIntensity.toFixed(2)}`);
 }
 
+// Iteration shaders bake fractal type and exponent into the source; recreate on change.
+// Variant-dependent uniforms are compiled out, so uniform calls pass allowMissing.
+const UNIFORM_OPTIONS = { allowMissing: true };
+
+function getShaderVariant(renderState) {
+	return {
+		fractalType: renderState.fractalType,
+		exponent: renderState.exponent,
+	};
+}
+
+function getShaderVariantKey(renderState) {
+	return `${renderState.fractalType}|${renderState.exponent}`;
+}
+
 function initializeStandardIterationUniforms(renderState) {
-	standardIterationRenderer.initializeUniform('u_center', 'float', [renderState.xPosition, renderState.yPosition]);
-	standardIterationRenderer.initializeUniform('u_zoom', 'float', renderState.zoomScale);
-	standardIterationRenderer.initializeUniform('u_fractalType', 'int', renderState.fractalType);
-	standardIterationRenderer.initializeUniform('u_exponent', 'int', renderState.exponent);
-	standardIterationRenderer.initializeUniform('u_cReal', 'float', renderState.cReal);
-	standardIterationRenderer.initializeUniform('u_cImaginary', 'float', renderState.cImaginary);
-	standardIterationRenderer.initializeUniform('u_escapeRadius', 'float', renderState.escapeRadius);
-	standardIterationRenderer.initializeUniform('u_logEscapeRadius', 'float', renderState.logEscapeRadius);
-	standardIterationRenderer.initializeUniform('u_iterations', 'int', renderState.iterations);
-	standardIterationRenderer.initializeUniform('u_stripeAverage', 'int', renderState.stripeAverage);
+	standardIterationRenderer.initializeUniform(
+		'u_center',
+		'float',
+		[renderState.xPosition, renderState.yPosition],
+		UNIFORM_OPTIONS,
+	);
+	standardIterationRenderer.initializeUniform('u_zoom', 'float', renderState.zoomScale, UNIFORM_OPTIONS);
+	standardIterationRenderer.initializeUniform('u_cReal', 'float', renderState.cReal, UNIFORM_OPTIONS);
+	standardIterationRenderer.initializeUniform('u_cImaginary', 'float', renderState.cImaginary, UNIFORM_OPTIONS);
+	standardIterationRenderer.initializeUniform('u_escapeRadius', 'float', renderState.escapeRadius, UNIFORM_OPTIONS);
+	standardIterationRenderer.initializeUniform(
+		'u_logEscapeRadius',
+		'float',
+		renderState.logEscapeRadius,
+		UNIFORM_OPTIONS,
+	);
+	standardIterationRenderer.initializeUniform('u_iterations', 'int', renderState.iterations, UNIFORM_OPTIONS);
 }
 
 function ensureStandardIterationRenderer(renderState) {
-	if (standardIterationRenderer) return;
-	standardIterationRenderer = new ShaderPad(generateStandardShader(), {
+	const variantKey = getShaderVariantKey(renderState);
+	if (standardIterationRenderer && standardIterationVariantKey === variantKey) return;
+	standardIterationRenderer?.destroy();
+	standardIterationRenderer = new ShaderPad(generateStandardShader(getShaderVariant(renderState)), {
 		...getShaderPadOptions(),
 		...METRIC_TEXTURE_OPTIONS,
 	});
+	standardIterationVariantKey = variantKey;
+	lastStandardIterationRenderSignature = null;
 	initializeStandardIterationUniforms(renderState);
 }
 
 function updateStandardIterationUniforms(renderState) {
-	standardIterationRenderer.updateUniforms({
-		u_center: [renderState.xPosition, renderState.yPosition],
-		u_zoom: renderState.zoomScale,
-		u_fractalType: renderState.fractalType,
-		u_exponent: renderState.exponent,
-		u_cReal: renderState.cReal,
-		u_cImaginary: renderState.cImaginary,
-		u_escapeRadius: renderState.escapeRadius,
-		u_logEscapeRadius: renderState.logEscapeRadius,
-		u_iterations: renderState.iterations,
-		u_stripeAverage: renderState.stripeAverage,
-	});
+	standardIterationRenderer.updateUniforms(
+		{
+			u_center: [renderState.xPosition, renderState.yPosition],
+			u_zoom: renderState.zoomScale,
+			u_cReal: renderState.cReal,
+			u_cImaginary: renderState.cImaginary,
+			u_escapeRadius: renderState.escapeRadius,
+			u_logEscapeRadius: renderState.logEscapeRadius,
+			u_iterations: renderState.iterations,
+		},
+		UNIFORM_OPTIONS,
+	);
 }
 
 function decomposeRadiusExact(radiusExact, fallbackRadius) {
@@ -874,12 +902,13 @@ function shouldRecenterDeepReference(renderState) {
 }
 
 function getStandardIterationBudget(zoom) {
-	// Constant within the standard zoom range so pixels don't suddenly escape as the
-	// user zooms in. For fractals deep mode doesn't support, grow with zoom past the
-	// deep threshold (deep mode never kicks in for those).
-	if (zoom <= DEEP_ZOOM_THRESHOLD) return BASE_ITERATIONS;
-	const target = Math.ceil(BASE_ITERATIONS + (zoom - DEEP_ZOOM_THRESHOLD) * DEEP_ITERATION_ZOOM_FACTOR);
-	return Math.min(DEEP_MAX_ITERATIONS, target);
+	// Ramp iteration budget toward the deep floor across the preparation margin.
+	const rampStartZoom = DEEP_ZOOM_THRESHOLD - DEEP_ZOOM_PREPARATION_MARGIN_EXPONENT;
+	if (zoom <= rampStartZoom) return BASE_ITERATIONS;
+	if (zoom > DEEP_ZOOM_THRESHOLD) return getDeepIterationBudget(zoom);
+	const rampProgress = (zoom - rampStartZoom) / DEEP_ZOOM_PREPARATION_MARGIN_EXPONENT;
+	const target = Math.ceil(BASE_ITERATIONS * Math.pow(DEEP_MIN_ITERATIONS / BASE_ITERATIONS, rampProgress));
+	return Math.min(DEEP_MIN_ITERATIONS, target);
 }
 
 function getDeepIterationBudget(zoom) {
@@ -896,39 +925,49 @@ function getDeepIterationBudget(zoom) {
 
 function initializeDeepIterationUniforms(renderState) {
 	const deepUniforms = getDeepShaderUniforms(renderState);
-	deepIterationRenderer.initializeUniform('u_iterations', 'int', renderState.deepIterations);
-	deepIterationRenderer.initializeUniform('u_orbitLength', 'int', deepUniforms.u_orbitLength);
-	deepIterationRenderer.initializeUniform('u_fractalType', 'int', renderState.fractalType);
-	deepIterationRenderer.initializeUniform('u_radiusMantissa', 'float', deepUniforms.u_radiusMantissa);
-	deepIterationRenderer.initializeUniform('u_radiusExponent', 'int', deepUniforms.u_radiusExponent);
-	deepIterationRenderer.initializeUniform('u_referenceOffset', 'float', deepUniforms.u_referenceOffset);
-	deepIterationRenderer.initializeUniform('u_escapeRadius', 'float', renderState.escapeRadius);
-	deepIterationRenderer.initializeUniform('u_logEscapeRadius', 'float', renderState.logEscapeRadius);
-	deepIterationRenderer.initializeUniform('u_stripeAverage', 'int', renderState.stripeAverage);
+	deepIterationRenderer.initializeUniform('u_iterations', 'int', renderState.deepIterations, UNIFORM_OPTIONS);
+	deepIterationRenderer.initializeUniform('u_orbitLength', 'int', deepUniforms.u_orbitLength, UNIFORM_OPTIONS);
+	deepIterationRenderer.initializeUniform(
+		'u_radiusMantissa',
+		'float',
+		deepUniforms.u_radiusMantissa,
+		UNIFORM_OPTIONS,
+	);
+	deepIterationRenderer.initializeUniform('u_radiusExponent', 'int', deepUniforms.u_radiusExponent, UNIFORM_OPTIONS);
+	deepIterationRenderer.initializeUniform(
+		'u_referenceOffset',
+		'float',
+		deepUniforms.u_referenceOffset,
+		UNIFORM_OPTIONS,
+	);
+	deepIterationRenderer.initializeUniform('u_escapeRadius', 'float', renderState.escapeRadius, UNIFORM_OPTIONS);
+	deepIterationRenderer.initializeUniform('u_logEscapeRadius', 'float', renderState.logEscapeRadius, UNIFORM_OPTIONS);
 }
 
 function updateDeepIterationUniforms(renderState) {
 	const deepUniforms = getDeepShaderUniforms(renderState);
-	deepIterationRenderer.updateUniforms({
-		u_iterations: renderState.deepIterations,
-		u_orbitLength: deepUniforms.u_orbitLength,
-		u_fractalType: renderState.fractalType,
-		u_radiusMantissa: deepUniforms.u_radiusMantissa,
-		u_radiusExponent: deepUniforms.u_radiusExponent,
-		u_referenceOffset: deepUniforms.u_referenceOffset,
-		u_escapeRadius: renderState.escapeRadius,
-		u_logEscapeRadius: renderState.logEscapeRadius,
-		u_stripeAverage: renderState.stripeAverage,
-	});
+	deepIterationRenderer.updateUniforms(
+		{
+			u_iterations: renderState.deepIterations,
+			u_orbitLength: deepUniforms.u_orbitLength,
+			u_radiusMantissa: deepUniforms.u_radiusMantissa,
+			u_radiusExponent: deepUniforms.u_radiusExponent,
+			u_referenceOffset: deepUniforms.u_referenceOffset,
+			u_escapeRadius: renderState.escapeRadius,
+			u_logEscapeRadius: renderState.logEscapeRadius,
+		},
+		UNIFORM_OPTIONS,
+	);
 }
 
 function syncDeepOrbitTexture() {
 	if (!deepIterationRenderer) return;
 
 	const orbitTextureSource = deepZoomManager.getOrbitTextureSource();
+	if (!orbitTextureSource) return;
+
 	const blaTextureSource = deepZoomManager.getBLATextureSource();
 	const visualPrefixTextureSource = deepZoomManager.getVisualPrefixTextureSource();
-	if (!orbitTextureSource || !blaTextureSource || !visualPrefixTextureSource) return;
 
 	if (lastUploadedDeepOrbitSignature === deepZoomManager.referenceSignature) return;
 
@@ -937,18 +976,21 @@ function syncDeepOrbitTexture() {
 			deepIterationRenderer.initializeTexture('u_orbitTexture', orbitTextureSource, ORBIT_TEXTURE_OPTIONS);
 			// BLA table uses the same RGBA32F NEAREST options as the orbit texture —
 			// both are sampled by index, not interpolated.
-			deepIterationRenderer.initializeTexture('u_blaTable', blaTextureSource, ORBIT_TEXTURE_OPTIONS);
-			deepIterationRenderer.initializeTexture(
-				'u_visualPrefixTexture',
-				visualPrefixTextureSource,
-				ORBIT_TEXTURE_OPTIONS,
-			);
+			if (blaTextureSource) {
+				deepIterationRenderer.initializeTexture('u_blaTable', blaTextureSource, ORBIT_TEXTURE_OPTIONS);
+			}
+			if (visualPrefixTextureSource) {
+				deepIterationRenderer.initializeTexture(
+					'u_visualPrefixTexture',
+					visualPrefixTextureSource,
+					ORBIT_TEXTURE_OPTIONS,
+				);
+			}
 		} else {
-			deepIterationRenderer.updateTextures({
-				u_orbitTexture: orbitTextureSource,
-				u_blaTable: blaTextureSource,
-				u_visualPrefixTexture: visualPrefixTextureSource,
-			});
+			const textureUpdates = { u_orbitTexture: orbitTextureSource };
+			if (blaTextureSource) textureUpdates.u_blaTable = blaTextureSource;
+			if (visualPrefixTextureSource) textureUpdates.u_visualPrefixTexture = visualPrefixTextureSource;
+			deepIterationRenderer.updateTextures(textureUpdates);
 		}
 	});
 
@@ -956,13 +998,19 @@ function syncDeepOrbitTexture() {
 }
 
 function ensureDeepIterationRenderer(renderState) {
-	if (deepIterationRenderer) return;
+	const variantKey = getShaderVariantKey(renderState);
+	if (deepIterationRenderer && deepIterationVariantKey === variantKey) return;
 
-	deepIterationRenderer = new ShaderPad(generatePerturbationShader(), {
+	deepIterationRenderer?.destroy();
+	deepIterationRenderer = new ShaderPad(generatePerturbationShader(getShaderVariant(renderState)), {
 		...getShaderPadOptions(),
 		...METRIC_TEXTURE_OPTIONS,
 	});
+	deepIterationVariantKey = variantKey;
 	lastDeepIterationRenderSignature = null;
+	lastUploadedDeepOrbitSignature = null;
+	deepMetricAnchor = null;
+	deepPreviewTransformCache = null;
 	initializeDeepIterationUniforms(renderState);
 	syncDeepOrbitTexture();
 }
@@ -973,23 +1021,29 @@ function ensureDisplayRenderer(renderState, iterationRenderer) {
 	displayRenderer.initializeUniform('u_insideColor', 'float', getInsideColor());
 	displayRenderer.initializeUniform('u_paletteFrame', 'float', renderState.paletteFrame);
 	displayRenderer.initializeUniform('u_colorScale', 'float', renderState.colorScale);
+	displayRenderer.initializeUniform('u_stripeAverage', 'int', renderState.stripeAverage);
 	displayRenderer.initializeUniform('u_slopeShading', 'int', renderState.slopeShading);
 	displayRenderer.initializeUniform('u_slopeLightDir', 'float', renderState.slopeLightDir);
 	displayRenderer.initializeUniform('u_slopeLightHeight', 'float', renderState.slopeLightHeight);
 	displayRenderer.initializeUniform('u_slopeLightIntensity', 'float', renderState.slopeLightIntensity);
+	displayRenderer.initializeUniform('u_previewScale', 'float', 1);
+	displayRenderer.initializeUniform('u_previewOffset', 'float', [0, 0]);
 	displayRenderer.initializeTexture('u_palette', buildPaletteTextureSource(), PALETTE_TEXTURE_OPTIONS);
 	displayRenderer.initializeTexture('u_liveMetrics', iterationRenderer);
 	displayRendererColorsVersion = colorsVersion;
 }
 
-function updateDisplayUniforms(renderState) {
+function updateDisplayUniforms(renderState, previewTransform) {
 	displayRenderer.updateUniforms({
 		u_paletteFrame: renderState.paletteFrame,
 		u_colorScale: renderState.colorScale,
+		u_stripeAverage: renderState.stripeAverage,
 		u_slopeShading: renderState.slopeShading,
 		u_slopeLightDir: renderState.slopeLightDir,
 		u_slopeLightHeight: renderState.slopeLightHeight,
 		u_slopeLightIntensity: renderState.slopeLightIntensity,
+		u_previewScale: previewTransform?.scale ?? 1,
+		u_previewOffset: [previewTransform?.offsetReal ?? 0, previewTransform?.offsetImag ?? 0],
 	});
 
 	if (displayRendererColorsVersion !== colorsVersion) {
@@ -1144,6 +1198,47 @@ function ensureDeepZoomPreparation(renderState, requested, support) {
 	});
 }
 
+function setDeepMetricAnchor(renderState) {
+	deepMetricAnchor = {
+		centerRealExact: renderState.centerRealExact,
+		centerImagExact: renderState.centerImagExact,
+		radiusExact: renderState.radiusExact,
+		key: `${renderState.centerRealExact}|${renderState.centerImagExact}|${renderState.radiusExact}`,
+	};
+	deepPreviewTransformCache = null;
+}
+
+function getDeepPreviewTransform(renderState) {
+	if (!deepMetricAnchor || !deepZoomManager.isInitialized) return null;
+	const cacheKey = [
+		deepMetricAnchor.key,
+		renderState.centerRealExact,
+		renderState.centerImagExact,
+		renderState.radiusExact,
+	].join('|');
+	if (deepPreviewTransformCache?.key === cacheKey) {
+		return deepPreviewTransformCache.transform;
+	}
+	const transform = deepZoomManager.computeViewTransform(
+		renderState.centerRealExact,
+		renderState.centerImagExact,
+		renderState.radiusExact,
+		deepMetricAnchor.centerRealExact,
+		deepMetricAnchor.centerImagExact,
+		deepMetricAnchor.radiusExact,
+	);
+	deepPreviewTransformCache = { key: cacheKey, transform };
+	return transform;
+}
+
+function shouldDeferDeepStepForPreview(previewTransform) {
+	if (!isDeepInteractionInMotion || lastDeepIterationRenderSignature === null) return false;
+	if (!previewTransform) return false;
+	const { scale, offsetReal, offsetImag } = previewTransform;
+	if (Math.abs(offsetReal) > 0.9 || Math.abs(offsetImag) > 0.9) return false;
+	return scale > DEEP_PREVIEW_REFRESH_MIN_SCALE && scale < DEEP_PREVIEW_REFRESH_MAX_SCALE;
+}
+
 function getDeepIterationRenderSignature(renderState) {
 	const referenceOffset = deepZoomManager.getReferenceOffsetFor(renderState);
 	return [
@@ -1160,7 +1255,6 @@ function getDeepIterationRenderSignature(renderState) {
 		renderState.exponent,
 		renderState.cReal.toPrecision(12),
 		renderState.cImaginary.toPrecision(12),
-		renderState.stripeAverage,
 		canvas.width,
 		canvas.height,
 	].join('|');
@@ -1178,7 +1272,6 @@ function getStandardIterationRenderSignature(renderState) {
 		renderState.cImaginary.toPrecision(12),
 		renderState.escapeRadius.toPrecision(12),
 		renderState.logEscapeRadius.toPrecision(12),
-		renderState.stripeAverage,
 		canvas.width,
 		canvas.height,
 	].join('|');
@@ -1221,19 +1314,28 @@ function render(time) {
 	//      the last good deep FBO if available, else fall through to standard.
 	//   3. Otherwise → standard renderer.
 	let iterationRenderer;
+	let deepPreviewTransform = null;
 	if (canRenderDeep) {
 		ensureDeepIterationRenderer(renderState);
 		const signature = getDeepIterationRenderSignature(renderState);
 		if (lastDeepIterationRenderSignature !== signature) {
-			profiler.measure('deep:updateUniforms', () => updateDeepIterationUniforms(renderState));
-			profiler.measure('deep:syncOrbit', () => syncDeepOrbitTexture());
-			profiler.measureGL('deep:iterStep (GPU)', () => deepIterationRenderer.step());
-			lastDeepIterationRenderSignature = signature;
-			profiler.note('deep:u_iterations', renderState.deepIterations);
+			const previewTransform = getDeepPreviewTransform(renderState);
+			if (shouldDeferDeepStepForPreview(previewTransform)) {
+				deepPreviewTransform = previewTransform;
+				profiler.note('deep:previewScale', previewTransform.scale);
+			} else {
+				profiler.measure('deep:updateUniforms', () => updateDeepIterationUniforms(renderState));
+				profiler.measure('deep:syncOrbit', () => syncDeepOrbitTexture());
+				profiler.measureGL('deep:iterStep (GPU)', () => deepIterationRenderer.step());
+				lastDeepIterationRenderSignature = signature;
+				setDeepMetricAnchor(renderState);
+				profiler.note('deep:u_iterations', renderState.deepIterations);
+			}
 		}
 		iterationRenderer = deepIterationRenderer;
 	} else if (deepHasCachedFrame) {
 		iterationRenderer = deepIterationRenderer;
+		deepPreviewTransform = getDeepPreviewTransform(renderState);
 		profiler.note('deep:holdFrame', 1);
 	} else {
 		ensureStandardIterationRenderer(renderState);
@@ -1251,7 +1353,7 @@ function render(time) {
 	profiler.measure('display:updateTextures', () =>
 		displayRenderer.updateTextures({ u_liveMetrics: iterationRenderer }),
 	);
-	profiler.measure('display:updateUniforms', () => updateDisplayUniforms(renderState));
+	profiler.measure('display:updateUniforms', () => updateDisplayUniforms(renderState, deepPreviewTransform));
 	profiler.measureGL('display:draw (GPU)', () => displayRenderer.draw());
 
 	maybeShowDeepZoomModeNotice(requestedDeepZoom, deepZoomSupport);

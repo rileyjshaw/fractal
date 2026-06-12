@@ -1,72 +1,66 @@
 # Fractal Explorer: GPU Edition
 
-This project lets you zoom into, modify, and explore several fractal formulas in the browser. The standard renderer is fast and interactive, but it still hits floating point precision limits at relatively shallow zoom depths. An experimental deep zoom path is now wired in on top of ShaderPad and GMP-WASM.
+This project lets you zoom into, modify, and explore several fractal formulas in the browser. The standard renderer is fast and interactive, but it still hits floating point precision limits at relatively shallow zoom depths. An experimental deep zoom path is now wired in on top of [ShaderPad](https://misery.co/shaderpad) and [GMP-WASM](https://github.com/Daninet/gmp-wasm).
 
-This is still a curiosity project rather than a polished product. Pull requests are welcome as long as the app stays reasonably performant and fun to explore.
+This project is just for fun and learning. Pull requests are welcome as long as the app stays performant and fun to explore.
 
 ![Example program output](/screenshots/julia.png)
 
 ## Features
 
-- Julia, Mandelbrot, Burning Ship, and Mandala formulas
+- Julia, Mandelbrot, Burning Ship, and Mandala formulas, each at any integer exponent from 2 to 16
+- Arbitrary-depth zoom via perturbation theory
 - Keyboard, mouse, and touch controls
-- Palette cycling and animated color offsets
+- Animated palettes, stripe-average coloring, slope shading, distance-estimate anti-aliasing
 - URL hash persistence for shareable views
-- Frame export
-- Experimental deep zoom infrastructure
+- PNG frame export
+- Works offline as a PWA
 
-## Current Deep Zoom Status
+## How it works
 
-Deep zoom is experimental and intentionally conservative right now.
+Rendering is a two-pass pipeline: an iteration pass writes a per-pixel metric (smooth escape time, stripe value, packed visual data, coverage) to an `RGBA32F` framebuffer, and a display pass maps it through the palette, lighting, and an ACES tone map. Palette animation and visual toggles only re-run the cheap display pass.
 
-- The renderer foundation has been migrated from TWGL to ShaderPad.
-- The deep zoom pipeline uses GMP-WASM to compute a reference orbit and uploads that orbit as a texture for a dedicated fragment shader.
-- Deep Julia and Mandelbrot rendering now run as a two-pass pipeline: an `R32F` iteration pass plus a display/compositor pass.
-- Smooth deep zoom preview uses fixed history-backed cache slots instead of rolling history reads.
-- Automatic/manual deep zoom requests currently only activate the experimental deep path for validated quadratic Julia and Mandelbrot cases.
-- Unsupported fractal or exponent combinations fall back to the standard renderer instead of showing a broken image.
+Past the deep-zoom threshold the iteration pass switches to perturbation: [gmp-wasm](https://github.com/Daninet/gmp-wasm) computes a high-precision reference orbit (uploaded as a texture), and the shader iterates only each pixel's tiny delta from it, carried in mantissa/exponent form so it survives any depth.
 
-At the moment, the supported deep zoom target is:
-
-- Mandelbrot
-- Julia
-- Exponent `2`
-
-Burning Ship, Mandala, and non-quadratic exponents stay on the standard renderer until their perturbation paths have been validated.
+- Quadratic Mandelbrot and Julia take the fast path: Newton-on-period reference search plus hierarchical bivariate linear approximation (BLA), which skips up to 2048 iterations at a time under a rigorous validity bound.
+- Burning Ship and Mandala perturb their `|z|` folds exactly (`diffabs`, correct across fold crossings); exponents above 2 use the binomial expansion of `(Z + δ)ᴺ − Zᴺ`. These variants use grid-sampled references and scalar perturbation, with Brent cycle detection so interior pixels exit early.
+- The fractal type and exponent are baked into the generated shader source — fully unrolled, branch-free inner loops with literal coefficients. Changing either recreates the renderer ([ShaderPad](https://misery.co/shaderpad) recreation on a shared canvas is nearly free).
+- While you zoom or pan, the display pass reprojects the last finished metric frame (with bilinear color blending) and fresh iteration passes are scheduled only as the view outgrows it, so interaction stays continuous even when one iteration pass takes seconds.
 
 ## Controls
 
 ### Keyboard
 
-- `C` / `Shift+C`: change palette
-- `D` / `Shift+D`: change render density
-- `E` / `Shift+E`: change exponent
-- `F` / `Shift+F`: change fractal type
-- `G` / `Shift+G`: change color density
-- `I` / `Shift+I`: change Julia imaginary component
-- `A`: toggle stripe average coloring
-- `Q` / `Shift+Q`: change escape radius
-- `R` / `Shift+R`: change Julia real component
-- `S` / `Shift+S`: change animation speed
-- `X`: reset state
 - `Z` / `Shift+Z`: zoom in / out
-- Arrow keys: pan
-- `Space`: play / pause palette animation
-- `Enter`: export the active frame
+- Arrow keys: pan (`Shift` for larger steps)
+- `F` / `E`: change fractal type / exponent
+- `R` / `I`: change the constant's real / imaginary component (Julia and Mandala)
+- `C` / `G`: change palette / color density
+- `A`: toggle stripe-average coloring
+- `N`, `L`, `K`, `J`: slope shading toggle, light angle, height, intensity
+- `Q`: change escape radius
+- `D`: change render density
+- `S`: change animation speed; `Space` pauses; `Shift+Space` reverses
+- `O` / `X`: return to origin / reset everything
+- `Enter`: export the current frame as PNG
+- `P`: toggle the profiler overlay
+- `?`: show help
+- Hold `Shift` with any stepped control above to reverse or shrink the step
 
 ### Mouse / Touch
 
 - Click / tap: set the image center
 - Scroll / swipe: zoom
-- Touch gestures: change palette and tweak parameters
+- Multi-finger swipe: change palette and tweak parameters
 
 ## Architecture
 
-- ShaderPad owns fullscreen rendering, uniforms, texture updates, and history-backed cache layers.
-- `src/main.js` owns application state, URL persistence, inputs, and renderer lifecycle.
-- `src/deepZoom.js` owns deep zoom eligibility, GMP initialization, orbit invalidation, and orbit texture payload preparation.
-- `src/perturbationShader.js` owns the experimental deep iteration pass.
-- `src/deepDisplayShader.js` owns the deep display/compositor pass.
+- [`src/main.js`](src/main.js) — application state, URL persistence, inputs, renderer lifecycle, zoom-preview scheduling
+- [`src/standardShader.js`](src/standardShader.js) / [`src/perturbationShader.js`](src/perturbationShader.js) — generators for the iteration pass (standard float and deep perturbation variants)
+- [`src/deepDisplayShader.js`](src/deepDisplayShader.js) — display/compositor pass
+- [`src/shaderCommon.js`](src/shaderCommon.js) — GLSL shared by all passes (metric packing, coloring math)
+- [`src/deepZoom.js`](src/deepZoom.js) / [`src/gmpUtils.js`](src/gmpUtils.js) — reference-orbit search and high-precision arithmetic
+- [`src/deepZoomTables.js`](src/deepZoomTables.js) — BLA hierarchy and orbit prefix tables
 
 ## Development
 
@@ -74,28 +68,24 @@ Burning Ship, Mandala, and non-quadratic exponents stay on the standard renderer
 git clone git@github.com:rileyjshaw/fractal.git
 cd fractal
 npm install
-npm run dev
+npm run dev   # local dev server
+npm test      # unit tests (perturbation math, shader structure, GMP orbits)
+npm run build # production build
 ```
 
-### Build
+## Built with
 
-```sh
-npm run build
-```
-
-## Dependencies
-
-- `shaderpad`
-- `gmp-wasm`
-- `@tweenjs/tween.js`
-- `tinykeys`
+- [ShaderPad](https://misery.co/shaderpad) — fullscreen WebGL2 rendering, uniforms, textures, framebuffers
+- [gmp-wasm](https://github.com/Daninet/gmp-wasm) — arbitrary-precision reference orbits (MPFR)
+- [tween.js](https://github.com/tweenjs/tween.js) — camera easing
+- [tinykeys](https://github.com/jamiebuilds/tinykeys) — keyboard shortcuts
+- [Vite](https://vitejs.dev) — dev server and bundling
 
 ## Limitations
 
-- Deep zoom is still experimental and not yet validated for every fractal or exponent combination.
-- Reference-orbit computation can take noticeable time on slower devices.
-- The standard renderer still loses precision at shallow deep-zoom ranges.
-- Deep zoom can now go past the old `1e12` cap, but pan/center state still ultimately comes from JS doubles; true arbitrary-depth navigation needs a high-range view state.
+- Variants without BLA (Burning Ship, Mandala, and exponents above 2) run every iteration scalar, so they render slower than quadratic Mandelbrot/Julia at equal depth; per-iteration cost also grows with the exponent.
+- Reference-orbit computation runs on the main thread and can take seconds at extreme depth.
+- Pan/center state ultimately derives from JS doubles; true arbitrary-depth navigation needs a high-range view state.
 
 ## License
 

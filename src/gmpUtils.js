@@ -4,8 +4,11 @@ const DEFAULT_PRECISION = 1200;
 const ORBIT_CAPACITY = Math.floor((1024 * 1024) / 3);
 const FRACTAL_TYPE_JULIA = 0;
 const FRACTAL_TYPE_MANDELBROT = 1;
-// The deep shader raises the effective bailout to 64 when stripe averaging is
-// enabled, so reference orbits must not stop at the old |z| > 20 threshold.
+const FRACTAL_TYPE_BURNING_SHIP = 2;
+const FRACTAL_TYPE_MANDALA = 3;
+// The deep shader's stripe runoff follows escaped pixels out to |z| > 64 (the stripe
+// bailout), so reference orbits must extend at least that far past the user's escape
+// radius rather than stopping at the old |z| > 20 threshold.
 const REFERENCE_ESCAPE_MAGNITUDE_SQ = 64 * 64;
 // Multipliers applied to the detected base period when trying Newton. Higher
 // multiples have more periodic points (period 2p has more than period p), giving
@@ -207,7 +210,14 @@ export class GMPUtils {
 		}
 	}
 
-	computeReferenceData(centerReal, centerImag, iterations, { fractalType = 1, cReal = 0, cImaginary = 0 } = {}) {
+	// Reference orbit for Julia, Mandelbrot, Burning Ship, and Mandala at exponent N ≥ 2.
+	// Burning Ship conjugates the center to match the standard shader's y-flipped sampling.
+	computeReferenceData(
+		centerReal,
+		centerImag,
+		iterations,
+		{ fractalType = 1, cReal = 0, cImaginary = 0, exponent = 2 } = {},
+	) {
 		if (!this.binding) {
 			throw new Error('GMP-WASM not initialized');
 		}
@@ -221,19 +231,27 @@ export class GMPUtils {
 		let y2 = null;
 		let xy = null;
 		let temp = null;
+		let powerReal = null;
+		let powerImag = null;
 		let escapeMagnitude = null;
 		let exponentPointer = null;
 
 		try {
-			const isJulia = fractalType === FRACTAL_TYPE_JULIA;
-			x = this.createMPFR(isJulia ? centerReal : 0);
-			y = this.createMPFR(isJulia ? centerImag : 0);
-			cx = this.createMPFR(isJulia ? cReal : centerReal);
-			cy = this.createMPFR(isJulia ? cImaginary : centerImag);
+			const isFolded = fractalType === FRACTAL_TYPE_BURNING_SHIP || fractalType === FRACTAL_TYPE_MANDALA;
+			const seedsFromCenter = fractalType === FRACTAL_TYPE_JULIA || fractalType === FRACTAL_TYPE_MANDALA;
+			x = this.createMPFR(seedsFromCenter ? centerReal : 0);
+			y = this.createMPFR(seedsFromCenter ? centerImag : 0);
+			cx = this.createMPFR(seedsFromCenter ? cReal : centerReal);
+			cy = this.createMPFR(seedsFromCenter ? cImaginary : centerImag);
+			if (fractalType === FRACTAL_TYPE_BURNING_SHIP) {
+				this.binding.mpfr_neg(cy, cy, 0);
+			}
 			x2 = this.createMPFR();
 			y2 = this.createMPFR();
 			xy = this.createMPFR();
 			temp = this.createMPFR();
+			powerReal = this.createMPFR();
+			powerImag = this.createMPFR();
 			escapeMagnitude = this.createMPFR();
 			exponentPointer = this.binding.malloc(8);
 
@@ -256,17 +274,43 @@ export class GMPUtils {
 					orbit[3 * i + 2] = scaleExponent;
 				}
 
-				this.binding.mpfr_mul(x2, x, x, 0);
-				this.binding.mpfr_mul(y2, y, y, 0);
-				this.binding.mpfr_sub(temp, x2, y2, 0);
-				this.binding.mpfr_add(temp, temp, cx, 0);
+				if (exponent === 2) {
+					this.binding.mpfr_mul(x2, x, x, 0);
+					this.binding.mpfr_mul(y2, y, y, 0);
+					this.binding.mpfr_sub(temp, x2, y2, 0);
+					this.binding.mpfr_add(temp, temp, cx, 0);
 
-				this.binding.mpfr_mul(xy, x, y, 0);
-				this.binding.mpfr_mul_d(xy, xy, 2, 0);
-				this.binding.mpfr_add(xy, xy, cy, 0);
+					this.binding.mpfr_mul(xy, x, y, 0);
+					this.binding.mpfr_mul_d(xy, xy, 2, 0);
+					// Folded formulas square (|x| + i|y|) instead of z, which only changes
+					// the imaginary part: 2|x||y| = |2xy|.
+					if (isFolded) this.binding.mpfr_abs(xy, xy, 0);
+					this.binding.mpfr_add(xy, xy, cy, 0);
 
-				this.binding.mpfr_set(x, temp, 0);
-				this.binding.mpfr_set(y, xy, 0);
+					this.binding.mpfr_set(x, temp, 0);
+					this.binding.mpfr_set(y, xy, 0);
+				} else {
+					// The orbit entry above stored the signed z; the folded fold happens on
+					// the working copy just before powering.
+					if (isFolded) {
+						this.binding.mpfr_abs(x, x, 0);
+						this.binding.mpfr_abs(y, y, 0);
+					}
+					this.binding.mpfr_set(powerReal, x, 0);
+					this.binding.mpfr_set(powerImag, y, 0);
+					for (let power = 1; power < exponent; power++) {
+						this.binding.mpfr_mul(x2, powerReal, x, 0);
+						this.binding.mpfr_mul(y2, powerImag, y, 0);
+						this.binding.mpfr_sub(temp, x2, y2, 0);
+						this.binding.mpfr_mul(x2, powerReal, y, 0);
+						this.binding.mpfr_mul(y2, powerImag, x, 0);
+						this.binding.mpfr_add(xy, x2, y2, 0);
+						this.binding.mpfr_set(powerReal, temp, 0);
+						this.binding.mpfr_set(powerImag, xy, 0);
+					}
+					this.binding.mpfr_add(x, powerReal, cx, 0);
+					this.binding.mpfr_add(y, powerImag, cy, 0);
+				}
 
 				this.binding.mpfr_mul(temp, x, x, 0);
 				this.binding.mpfr_mul(xy, y, y, 0);
@@ -290,7 +334,7 @@ export class GMPUtils {
 			if (exponentPointer) {
 				this.binding.free(exponentPointer);
 			}
-			this.disposeMPFR(x, y, cx, cy, x2, y2, xy, temp, escapeMagnitude);
+			this.disposeMPFR(x, y, cx, cy, x2, y2, xy, temp, powerReal, powerImag, escapeMagnitude);
 		}
 	}
 

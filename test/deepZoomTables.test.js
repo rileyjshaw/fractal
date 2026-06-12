@@ -12,6 +12,7 @@ import {
 	readBLAEntry,
 	stripeAverageAddend,
 } from '../src/deepZoomTables.js';
+import { STRIPE_EWMA_ALPHA } from '../src/shaderCommon.js';
 
 function buildOrbit(length) {
 	const orbit = new Float32Array(length * 3);
@@ -91,26 +92,67 @@ test('composed validity is no looser than child validity constraints', () => {
 	assert.ok(composed.validityRsqLog2 <= right.validityRsqLog2);
 });
 
-test('visual prefix differences match direct shader addend sums', () => {
+test('visual prefix stripe channel follows the shared EWMA recurrence', () => {
 	const orbit = buildOrbit(128);
 	const prefix = buildVisualPrefixTextureData(orbit);
-	const start = 19;
-	const chunk = 32;
 	let detailTotal = 0;
-	let stripeTotal = 0;
+	let stripeEwma = 0.5;
 	let lastStripeValue = 0.5;
 
-	for (let i = start + 1; i <= start + chunk; i++) {
+	assert.equal(prefix[1], 0.5);
+
+	for (let i = 1; i < 128; i++) {
 		const x = orbit[i * 3] * Math.pow(2, orbit[i * 3 + 2]);
 		const y = orbit[i * 3 + 1] * Math.pow(2, orbit[i * 3 + 2]);
 		detailTotal += orbitDetailValue(x, y);
 		lastStripeValue = stripeAverageAddend(x, y);
-		stripeTotal += lastStripeValue;
+		stripeEwma += (lastStripeValue - stripeEwma) * STRIPE_EWMA_ALPHA;
+		if (i === 1 || i === 19 || i === 51 || i === 127) {
+			assert.ok(Math.abs(prefix[i * 4] - detailTotal) < 1e-5, `detail at ${i}`);
+			assert.ok(Math.abs(prefix[i * 4 + 1] - stripeEwma) < 1e-6, `ewma at ${i}`);
+			assert.ok(Math.abs(prefix[i * 4 + 2] - lastStripeValue) < 1e-6, `addend at ${i}`);
+		}
+	}
+});
+
+test('a BLA chunk jump reconstructs the pixel EWMA exactly via the prefix channel', () => {
+	const orbit = buildOrbit(128);
+	const prefix = buildVisualPrefixTextureData(orbit);
+	const start = 19;
+	const chunk = 32;
+	const decay = Math.pow(1 - STRIPE_EWMA_ALPHA, chunk);
+
+	let pixelEwma = 0.5;
+	for (let i = 1; i <= start; i++) {
+		const x = orbit[i * 3] * Math.pow(2, orbit[i * 3 + 2]);
+		const y = orbit[i * 3 + 1] * Math.pow(2, orbit[i * 3 + 2]);
+		pixelEwma += (stripeAverageAddend(x, y) - pixelEwma) * STRIPE_EWMA_ALPHA;
+	}
+	const jumped = pixelEwma * decay + (prefix[(start + chunk) * 4 + 1] - prefix[start * 4 + 1] * decay);
+
+	for (let i = start + 1; i <= start + chunk; i++) {
+		const x = orbit[i * 3] * Math.pow(2, orbit[i * 3 + 2]);
+		const y = orbit[i * 3 + 1] * Math.pow(2, orbit[i * 3 + 2]);
+		pixelEwma += (stripeAverageAddend(x, y) - pixelEwma) * STRIPE_EWMA_ALPHA;
 	}
 
-	const before = start * 4;
-	const after = (start + chunk) * 4;
-	assert.ok(Math.abs(prefix[after] - prefix[before] - detailTotal) < 1e-5);
-	assert.ok(Math.abs(prefix[after + 1] - prefix[before + 1] - stripeTotal) < 1e-5);
-	assert.ok(Math.abs(prefix[after + 2] - lastStripeValue) < 1e-6);
+	assert.ok(Math.abs(jumped - pixelEwma) < 1e-5, `${jumped} != ${pixelEwma}`);
+});
+
+test('visual prefix min channel carries the running orbit |z|² minimum', () => {
+	const orbit = buildOrbit(128);
+	const prefix = buildVisualPrefixTextureData(orbit);
+
+	let minMagSq = Infinity;
+	let cursor = 1;
+	for (const index of [1, 17, 64, 127]) {
+		for (; cursor <= index; cursor++) {
+			const x = orbit[cursor * 3] * Math.pow(2, orbit[cursor * 3 + 2]);
+			const y = orbit[cursor * 3 + 1] * Math.pow(2, orbit[cursor * 3 + 2]);
+			minMagSq = Math.min(minMagSq, x * x + y * y);
+		}
+		assert.ok(Math.abs(prefix[index * 4 + 3] - minMagSq) < 1e-6 * Math.max(1, minMagSq), `index ${index}`);
+	}
+
+	assert.ok(prefix[3] > 1e29);
 });
