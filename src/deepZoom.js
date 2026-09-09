@@ -1,3 +1,4 @@
+import { precisionForView } from './math/precision.js';
 import { GMPUtils } from './gmpUtils.js';
 import * as profiler from './profiler.js';
 import {
@@ -196,6 +197,7 @@ export class DeepZoomManager {
 			centerReal,
 			centerImag,
 			radius,
+			precisionForView(centerReal, centerImag, radius),
 			referenceIterations,
 			state.fractalType,
 			state.exponent,
@@ -446,6 +448,7 @@ export class DeepZoomManager {
 					state.requiredIterations ?? state.deepIterations ?? state.iterations,
 					state.deepIterations ?? state.iterations,
 					{
+						radiusExact: state.radiusExact ?? state.radius,
 						fractalType: state.fractalType,
 						exponent: state.exponent,
 						cReal: state.cReal,

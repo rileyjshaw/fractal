@@ -1,3 +1,4 @@
+import { precisionForView } from './math/precision.js';
 import { init } from 'gmp-wasm';
 
 const DEFAULT_PRECISION = 1200;
@@ -20,6 +21,7 @@ const NEWTON_PERIOD_MULTIPLIERS = [1, 2, 4, 8];
 export class GMPUtils {
 	constructor() {
 		this.binding = null;
+		this.precision = DEFAULT_PRECISION;
 		this.initialized = false;
 	}
 
@@ -31,6 +33,10 @@ export class GMPUtils {
 		this.initialized = true;
 	}
 
+	ensureViewPrecision(real, imag, radius, width, height) {
+		this.precision = Math.max(this.precision, precisionForView(real, imag, radius, width, height));
+		return this.precision;
+	}
 	setMPFRValue(mpfr, value) {
 		if (typeof value === 'string') {
 			const result = this.binding.mpfr_set_string(mpfr, value, 10, 0);
@@ -45,7 +51,7 @@ export class GMPUtils {
 		}
 	}
 
-	createMPFR(value = 0, precision = DEFAULT_PRECISION) {
+	createMPFR(value = 0, precision = this.precision) {
 		if (!this.binding) {
 			throw new Error('GMP-WASM not initialized');
 		}
@@ -81,7 +87,7 @@ export class GMPUtils {
 		return this.binding.mpfr_to_string(mpfr, 10, 0, false);
 	}
 
-	decomposeValue(value, precision = DEFAULT_PRECISION) {
+	decomposeValue(value, precision = this.precision) {
 		if (!this.binding) {
 			throw new Error('GMP-WASM not initialized');
 		}
@@ -98,7 +104,7 @@ export class GMPUtils {
 		}
 	}
 
-	scaleValue(value, factor, precision = DEFAULT_PRECISION) {
+	scaleValue(value, factor, precision = this.precision) {
 		if (!this.binding) {
 			throw new Error('GMP-WASM not initialized');
 		}
@@ -125,12 +131,17 @@ export class GMPUtils {
 		sourceCenterReal,
 		sourceCenterImag,
 		sourceRadius,
-		precision = DEFAULT_PRECISION,
+		precision = this.precision,
 	) {
 		if (!this.binding) {
 			throw new Error('GMP-WASM not initialized');
 		}
 
+		precision = Math.max(
+			precision,
+			this.ensureViewPrecision(currentCenterReal, currentCenterImag, currentRadius),
+			this.ensureViewPrecision(sourceCenterReal, sourceCenterImag, sourceRadius),
+		);
 		let currentReal = null;
 		let currentImag = null;
 		let sourceReal = null;
@@ -178,11 +189,12 @@ export class GMPUtils {
 		}
 	}
 
-	translateCenter(centerReal, centerImag, radius, deltaReal, deltaImag, precision = DEFAULT_PRECISION) {
+	translateCenter(centerReal, centerImag, radius, deltaReal, deltaImag, precision = this.precision) {
 		if (!this.binding) {
 			throw new Error('GMP-WASM not initialized');
 		}
 
+		precision = Math.max(precision, this.ensureViewPrecision(centerReal, centerImag, radius));
 		let real = null;
 		let imag = null;
 		let radiusValue = null;
@@ -216,12 +228,13 @@ export class GMPUtils {
 		centerReal,
 		centerImag,
 		iterations,
-		{ fractalType = 1, cReal = 0, cImaginary = 0, exponent = 2 } = {},
+		{ fractalType = 1, cReal = 0, cImaginary = 0, exponent = 2, radiusExact = '1e-20' } = {},
 	) {
 		if (!this.binding) {
 			throw new Error('GMP-WASM not initialized');
 		}
 
+		this.ensureViewPrecision(centerReal, centerImag, radiusExact);
 		const orbit = new Float32Array(Math.min(iterations, ORBIT_CAPACITY) * 3);
 		let x = null;
 		let y = null;
@@ -368,6 +381,7 @@ export class GMPUtils {
 			throw new Error('GMP-WASM not initialized');
 		}
 
+		this.ensureViewPrecision(centerReal, centerImag, maxRadius);
 		const {
 			fractalType = FRACTAL_TYPE_MANDELBROT,
 			cReal = 0,

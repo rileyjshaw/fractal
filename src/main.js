@@ -18,6 +18,10 @@ import { generateDeepDisplayShader } from './deepDisplayShader.js';
 import { generatePerturbationShader } from './perturbationShader.js';
 import { generateStandardShader } from './standardShader.js';
 import { N_COLORS } from './shaderCommon.js';
+import { stateFromHash } from './state/urlState.js';
+import { validateStatePatch } from './state/viewState.js';
+import { precisionForView } from './math/precision.js';
+import { describeFrame, frameCompatible, previewCovered } from './render/frame.js';
 import { repairMetrics } from './render/metric.js';
 import * as profiler from './profiler.js';
 
@@ -139,6 +143,7 @@ let standardIterationRenderer = null;
 let standardIterationVariantKey = null;
 let deepIterationRenderer = null;
 let deepMetricSource = null;
+let deepFrame = null;
 let deepIterationVariantKey = null;
 let displayRenderer = null;
 let lastStandardIterationRenderSignature = null;
@@ -481,6 +486,7 @@ function resetState() {
 }
 
 function setState(diff) {
+	diff = validateStatePatch(diff, state, paletteIds);
 	let didUpdate = false;
 	let hasApproximateCenterDiff = false;
 	let hasPreciseCenterDiff = false;
@@ -524,65 +530,13 @@ const persistStateToHash = debounce(function persistStateToHash() {
 }, 200);
 
 function updateStateFromHash() {
-	const hash = location.hash.substring(1);
-	try {
-		let hasApproximateCenterState = false;
-		let hasPreciseCenterState = false;
-		let hasPreciseRadiusState = false;
-		const entries = hash
-			.split('_')
-			.map(str => {
-				if (!str) return null;
-
-				const [shortKey, encodedValue] = str.split('=');
-				const key =
-					shortKey === 'V' ? 'stripeAverage' : Object.keys(shortKeys).find(k => shortKeys[k] === shortKey);
-				if (!key) return null;
-				const parser = stateParsers[key];
-				const value = parser(decodeURIComponent(encodedValue));
-				return [key, value];
-			})
-			.filter(Boolean);
-		entries.forEach(([key, value]) => {
-			state[key] = value;
-			switch (key) {
-				case 'deepCenterReal':
-				case 'deepCenterImag':
-					hasPreciseCenterState = true;
-					break;
-				case 'deepRadius':
-					hasPreciseRadiusState = true;
-					break;
-				case 'xPosition':
-					hasApproximateCenterState = true;
-					smoothedPosition[0] = value;
-					break;
-				case 'yPosition':
-					hasApproximateCenterState = true;
-					smoothedPosition[1] = value;
-					break;
-				case 'zoom':
-					smoothedZoom[0] = value;
-					break;
-				case 'paletteId':
-					paletteIdx = paletteIds.indexOf(value);
-					updateColors(0);
-					break;
-			}
-		});
-		if (hasPreciseCenterState) {
-			syncApproximateCenterFromPreciseState({ syncSmoothed: true });
-		} else if (hasApproximateCenterState) {
-			syncPreciseCenterFromApproximateState();
-		}
-		if (!hasPreciseRadiusState) {
-			syncPreciseRadiusFromApproximateZoom();
-		}
-
-		return entries.length;
-	} catch (e) {
-		console.error('Error parsing the hash', e);
-	}
+	const parsed = stateFromHash(location.hash, state, shortKeys, stateParsers, paletteIds);
+	Object.assign(state, parsed.state);
+	syncApproximateCenterFromPreciseState({ syncSmoothed: true });
+	smoothedZoom[0] = state.zoom;
+	paletteIdx = paletteIds.indexOf(state.paletteId);
+	updateColors(0);
+	return parsed.count;
 }
 
 let showLabels = true;
@@ -1091,6 +1045,7 @@ function getRenderState() {
 		Math.min(MAX_SLOPE_LIGHT_INTENSITY, state.slopeLightIntensity),
 	);
 	const renderState = {
+		precision: precisionForView(centerRealExact, centerImagExact, radiusExact, canvas.width, canvas.height),
 		xPosition: smoothedPosition[0],
 		yPosition: smoothedPosition[1],
 		centerReal: Number.isFinite(approximateCenterReal) ? approximateCenterReal : smoothedPosition[0] * 2,
@@ -1240,7 +1195,7 @@ function getDeepPreviewTransform(renderState) {
 
 function shouldDeferDeepStepForPreview(previewTransform) {
 	if (!isDeepInteractionInMotion || lastDeepIterationRenderSignature === null) return false;
-	if (!previewTransform) return false;
+	if (!previewCovered(previewTransform, canvas.width, canvas.height)) return false;
 	const { scale, offsetReal, offsetImag } = previewTransform;
 	if (Math.abs(offsetReal) > 0.9 || Math.abs(offsetImag) > 0.9) return false;
 	return scale > DEEP_PREVIEW_REFRESH_MIN_SCALE && scale < DEEP_PREVIEW_REFRESH_MAX_SCALE;
@@ -1311,7 +1266,11 @@ function render(time) {
 	const canRenderDeep =
 		requestedDeepZoom && deepZoomSupport.supported && canRenderFromCurrentDeepReference(renderState);
 	const deepHasCachedFrame =
-		requestedDeepZoom && deepZoomSupport.supported && deepMetricSource && lastDeepIterationRenderSignature;
+		requestedDeepZoom &&
+		deepZoomSupport.supported &&
+		deepMetricSource &&
+		frameCompatible(deepFrame, renderState, canvas.width, canvas.height) &&
+		lastDeepIterationRenderSignature;
 
 	// Iteration pass: run only when something iteration-affecting changed.
 	//   1. Deep reference exists → step deep iteration. Short-orbit references
@@ -1340,6 +1299,7 @@ function render(time) {
 				const repaired = repairMetrics(deepZoomManager.gmp, pixels, renderState, canvas.width, canvas.height);
 				profiler.note('deep:repairedPixels', repaired);
 				deepMetricSource = { data: pixels, width: canvas.width, height: canvas.height };
+				deepFrame = describeFrame(renderState, canvas.width, canvas.height, deepZoomManager.referenceSignature);
 				lastDeepIterationRenderSignature = signature;
 				setDeepMetricAnchor(renderState);
 				profiler.note('deep:u_iterations', renderState.deepIterations);

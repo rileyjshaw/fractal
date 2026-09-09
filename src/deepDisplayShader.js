@@ -166,6 +166,11 @@ void main() {
 	vec2 anchorDelta = viewDelta * u_previewScale + u_previewOffset;
 	vec2 anchorUv = (anchorDelta / pixelScale + 1.0) * 0.5;
 
+    // Uncovered preview regions have no metric data. Never stretch edge texels.
+    if (any(lessThan(anchorUv, vec2(0.0))) || any(greaterThan(anchorUv, vec2(1.0)))) {
+        outColor = vec4(linearToSrgb(toneMapACES(u_insideColor * EXPOSURE)), 1.0);
+        return;
+    }
 	vec3 linearColor;
 	if (u_previewScale == 1.0 && u_previewOffset == vec2(0.0)) {
 		linearColor = displayColorAt(clampTexel(ivec2(anchorUv * vec2(size)), size), size);

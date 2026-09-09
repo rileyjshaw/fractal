@@ -1,3 +1,4 @@
+import { logDecimal } from '../math/precision.js';
 import { STRIPE_EWMA_ALPHA } from '../shaderCommon.js';
 export const METRIC_SCHEMA = 1;
 export const INVALID_METRIC = [-1, 0, 0, -1];
@@ -54,7 +55,7 @@ export function metricFromOrbit(orbit, state) {
 			if (analytic) {
 				const logDistance =
 					Math.log(0.5 * mag * Math.max(Math.log(mag), 1e-6)) - Math.log(Math.hypot(dx, dy)) - logD;
-				const radiusLog = Math.log(Number(state.radiusExact));
+				const radiusLog = logDecimal(state.radiusExact);
 				const boundary = 1 - smoothstep(0.003, 0.12, Math.exp(clamp(logDistance - radiusLog, -30, 30)));
 				brightness = 1 + 0.16 * boundary * smoothstep(4, 32, i);
 			} else brightness = 1 + (0.82 + (0.34 * detail) / i - 1) * smoothstep(3, 24, i);
