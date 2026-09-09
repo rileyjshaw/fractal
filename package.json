@@ -8,12 +8,14 @@
 		"build": "vite build",
 		"generate-pwa-assets": "pwa-assets-generator",
 		"preview": "vite preview",
-		"test": "node --test",
+		"test": "node --test test/*.test.js",
 		"format": "prettier --write \"src/**/*.{html,css,js,json}\"",
 		"format:check": "prettier --check \"src/**/*.{html,css,js,json}\"",
-		"lint": "npm run format"
+		"lint": "npm run format",
+		"test:gpu": "playwright test"
 	},
 	"devDependencies": {
+		"@playwright/test": "^1.63.0",
 		"@vite-pwa/assets-generator": "^1.0.2",
 		"prettier": "3.8.3",
 		"vite": "^8.0.13",

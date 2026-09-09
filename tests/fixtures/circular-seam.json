@@ -1,0 +1,15 @@
+{
+	"centerRealExact": "-0.868589032430991",
+	"centerImagExact": "-0.2569673104245385",
+	"radiusExact": "1.9578645360972025e-10",
+	"zoom": 33.25,
+	"fractalType": 1,
+	"exponent": 2,
+	"cReal": -0.71,
+	"cImaginary": -0.43,
+	"deepIterations": 16384,
+	"iterations": 16384,
+	"escapeRadius": 2,
+	"width": 64,
+	"height": 40
+}

@@ -103,7 +103,12 @@ function glslComponentDiffabs(out, aMantExpr, tMantExpr) {
 // for the analytic quadratic variants — the folded fold lines and the non-quadratic
 // validity bound aren't covered by the table builder. Everything else runs scalar
 // perturbation with Brent cycle detection so interior pixels don't burn the budget.
-export function generatePerturbationShader({ fractalType = 1, exponent = 2 } = {}) {
+export function generatePerturbationShader({
+	fractalType = 1,
+	exponent = 2,
+	blaLevels = BLA_MAX_LEVELS,
+	diagnostic = false,
+} = {}) {
 	const isJulia = fractalType === FRACTAL_TYPE_JULIA;
 	const isMandelbrot = fractalType === FRACTAL_TYPE_MANDELBROT;
 	const isShip = fractalType === FRACTAL_TYPE_BURNING_SHIP;
@@ -115,14 +120,14 @@ export function generatePerturbationShader({ fractalType = 1, exponent = 2 } = {
 	// Burning Ship iterate from the critical point with c = pixel, so it seeds c.
 	const deltaSeedsZ = isJulia || isMandala;
 	const hasDeltaC = !deltaSeedsZ;
-	const useBLA = isAnalytic && isQuadratic;
+	const useBLA = isAnalytic && isQuadratic && blaLevels > 0;
 	const hasDerivative = isAnalytic && isQuadratic;
 	const useCycleDetection = !useBLA;
 	const interiorArg = isMandelbrot && isQuadratic ? 'INTERIOR_FLAT' : 'minMagSq';
 
 	const blaDefines = useBLA
 		? `#define BLA_BASE_CHUNK_SIZE ${BLA_BASE_CHUNK_SIZE}
-#define BLA_MAX_LEVELS ${BLA_MAX_LEVELS}
+#define BLA_MAX_LEVELS ${Math.max(1, Math.min(BLA_MAX_LEVELS, blaLevels))}
 #define BLA_LEVEL_STRIDE ${BLA_LEVEL_STRIDE}
 #define BLA_TEXTURE_WIDTH ${BLA_TEXTURE_WIDTH}
 `
@@ -177,7 +182,7 @@ vec4 getVisualPrefix(int i) {
 // the fixed chunk sizes and the fixed alpha, baked once per variant (zoom never
 // recompiles anything).
 const float BLA_STRIPE_EWMA_CHUNK_DECAY[BLA_MAX_LEVELS] = float[](${Array.from(
-				{ length: BLA_MAX_LEVELS },
+				{ length: Math.max(1, Math.min(BLA_MAX_LEVELS, blaLevels)) },
 				(_, level) => {
 					const decay = Math.pow(1 - STRIPE_EWMA_ALPHA, BLA_BASE_CHUNK_SIZE << level);
 					return decay < 1e-30 ? '0.0' : decay.toExponential(8);
@@ -285,6 +290,7 @@ ${
 					dy = newDy;
 					q = newQ;
 					S = newS;
+					skippedIterations += blaChunkSize;
 					k += blaChunkSize;
 					j += blaChunkSize - 1;
 					orbitCurrent = chunkEndOrbit;
@@ -568,6 +574,7 @@ ${
 		: ''
 }	int detailSamples = 0;
 	bool escaped = false;
+	int skippedIterations = 0;
 ${
 	hasDerivative
 		? `	vec2 derivative = ${isJulia ? 'vec2(1.0, 0.0)' : 'vec2(0.0)'};
@@ -670,6 +677,7 @@ ${stripeRunoff}
 		// cardioid/bulb early-out look; everything else shades by min |z|.
 		FragColor = interiorMetric(${interiorArg});
 	}
+${diagnostic ? 'FragColor = vec4(float(skippedIterations), float(j), escaped ? 1.0 : 0.0, 1.0);' : ''}
 }
 `;
 }
