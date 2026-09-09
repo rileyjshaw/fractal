@@ -18,6 +18,7 @@ import { generateDeepDisplayShader } from './deepDisplayShader.js';
 import { generatePerturbationShader } from './perturbationShader.js';
 import { generateStandardShader } from './standardShader.js';
 import { N_COLORS } from './shaderCommon.js';
+import { repairMetrics } from './render/metric.js';
 import * as profiler from './profiler.js';
 
 // Auto-update the service worker.
@@ -137,6 +138,7 @@ let resolutionMultiplier = window.devicePixelRatio || 1;
 let standardIterationRenderer = null;
 let standardIterationVariantKey = null;
 let deepIterationRenderer = null;
+let deepMetricSource = null;
 let deepIterationVariantKey = null;
 let displayRenderer = null;
 let lastStandardIterationRenderSignature = null;
@@ -717,7 +719,12 @@ function syncCanvasResolution() {
 	// task, leaving u_liveMetrics bound to a deleted texture and the canvas black
 	// until the next signature change. Sync now and rebind the sampler.
 	standardIterationRenderer?.syncRes();
-	deepIterationRenderer?.syncRes();
+	if (deepIterationRenderer) {
+		deepIterationRenderer.canvas.width = width;
+		deepIterationRenderer.canvas.height = height;
+		deepIterationRenderer.syncRes();
+	}
+	deepMetricSource = null;
 	displayRenderer?.syncRes();
 	// Force the next frame to re-run the iteration pass so the display sampler
 	// rebinds against the freshly recreated metric FBO.
@@ -1003,7 +1010,7 @@ function ensureDeepIterationRenderer(renderState) {
 
 	deepIterationRenderer?.destroy();
 	deepIterationRenderer = new ShaderPad(generatePerturbationShader(getShaderVariant(renderState)), {
-		...getShaderPadOptions(),
+		canvas: { width: canvas.width, height: canvas.height },
 		...METRIC_TEXTURE_OPTIONS,
 	});
 	deepIterationVariantKey = variantKey;
@@ -1029,7 +1036,7 @@ function ensureDisplayRenderer(renderState, iterationRenderer) {
 	displayRenderer.initializeUniform('u_previewScale', 'float', 1);
 	displayRenderer.initializeUniform('u_previewOffset', 'float', [0, 0]);
 	displayRenderer.initializeTexture('u_palette', buildPaletteTextureSource(), PALETTE_TEXTURE_OPTIONS);
-	displayRenderer.initializeTexture('u_liveMetrics', iterationRenderer);
+	displayRenderer.initializeTexture('u_liveMetrics', iterationRenderer, METRIC_TEXTURE_OPTIONS);
 	displayRendererColorsVersion = colorsVersion;
 }
 
@@ -1304,7 +1311,7 @@ function render(time) {
 	const canRenderDeep =
 		requestedDeepZoom && deepZoomSupport.supported && canRenderFromCurrentDeepReference(renderState);
 	const deepHasCachedFrame =
-		requestedDeepZoom && deepZoomSupport.supported && deepIterationRenderer && lastDeepIterationRenderSignature;
+		requestedDeepZoom && deepZoomSupport.supported && deepMetricSource && lastDeepIterationRenderSignature;
 
 	// Iteration pass: run only when something iteration-affecting changed.
 	//   1. Deep reference exists → step deep iteration. Short-orbit references
@@ -1327,14 +1334,20 @@ function render(time) {
 				profiler.measure('deep:updateUniforms', () => updateDeepIterationUniforms(renderState));
 				profiler.measure('deep:syncOrbit', () => syncDeepOrbitTexture());
 				profiler.measureGL('deep:iterStep (GPU)', () => deepIterationRenderer.step());
+				const pixels = new Float32Array(canvas.width * canvas.height * 4);
+				const gl = deepIterationRenderer.gl;
+				gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.FLOAT, pixels);
+				const repaired = repairMetrics(deepZoomManager.gmp, pixels, renderState, canvas.width, canvas.height);
+				profiler.note('deep:repairedPixels', repaired);
+				deepMetricSource = { data: pixels, width: canvas.width, height: canvas.height };
 				lastDeepIterationRenderSignature = signature;
 				setDeepMetricAnchor(renderState);
 				profiler.note('deep:u_iterations', renderState.deepIterations);
 			}
 		}
-		iterationRenderer = deepIterationRenderer;
+		iterationRenderer = deepMetricSource;
 	} else if (deepHasCachedFrame) {
-		iterationRenderer = deepIterationRenderer;
+		iterationRenderer = deepMetricSource;
 		deepPreviewTransform = getDeepPreviewTransform(renderState);
 		profiler.note('deep:holdFrame', 1);
 	} else {
@@ -1357,6 +1370,12 @@ function render(time) {
 	profiler.measureGL('display:draw (GPU)', () => displayRenderer.draw());
 
 	maybeShowDeepZoomModeNotice(requestedDeepZoom, deepZoomSupport);
+	if (import.meta.env.DEV)
+		window.fractalDiagnostics = {
+			mode: iterationRenderer === deepMetricSource ? 'deep' : 'standard',
+			reference: deepZoomManager.referenceSignature,
+			frame: lastDeepIterationRenderSignature,
+		};
 	profiler.tick(time);
 	requestAnimationFrame(render);
 }

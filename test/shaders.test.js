@@ -31,7 +31,7 @@ const displayShader = generateDeepDisplayShader();
 // Count GLSL function *definitions* (a return-type keyword immediately precedes the name);
 // function calls like `return foo(` have no type prefix and are not counted.
 function definitionCount(src, fn) {
-	const re = new RegExp(`\\b(?:vec[234]|float|bool|void|int)\\s+${fn}\\s*\\(`, 'g');
+	const re = new RegExp(`\\b(?:vec[234]|float|bool|void|int)\\s+${fn}\\s*\\([^;{}]*\\)\\s*\\{`, 'g');
 	return (src.match(re) || []).length;
 }
 
@@ -174,7 +174,7 @@ test('BLA exists exactly for analytic quadratic perturbation variants', () => {
 		// Variants without BLA rely on cycle detection instead.
 		assert.equal(
 			src.includes('tortoise'),
-			!expectBLA,
+			false,
 			`perturbation ${variantLabel(variant)} cycle detection presence should be ${!expectBLA}`,
 		);
 	}

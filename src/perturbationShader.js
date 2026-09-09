@@ -102,7 +102,7 @@ function glslComponentDiffabs(out, aMantExpr, tMantExpr) {
 // BLA (and the visual-prefix stripe/min approximations that ride on it) only exists
 // for the analytic quadratic variants — the folded fold lines and the non-quadratic
 // validity bound aren't covered by the table builder. Everything else runs scalar
-// perturbation with Brent cycle detection so interior pixels don't burn the budget.
+// perturbation; repeated reconstructed float values are not proof of a cycle.
 export function generatePerturbationShader({
 	fractalType = 1,
 	exponent = 2,
@@ -122,7 +122,7 @@ export function generatePerturbationShader({
 	const hasDeltaC = !deltaSeedsZ;
 	const useBLA = isAnalytic && isQuadratic && blaLevels > 0;
 	const hasDerivative = isAnalytic && isQuadratic;
-	const useCycleDetection = !useBLA;
+
 	const interiorArg = isMandelbrot && isQuadratic ? 'INTERIOR_FLAT' : 'minMagSq';
 
 	const blaDefines = useBLA
@@ -147,6 +147,16 @@ uniform sampler2D u_visualPrefixTexture;
 
 	const derivativeHelpers = hasDerivative
 		? `
+vec2 cmul(vec2 a, vec2 b);
+// D = derivative * exp(logOffset). Align both affine terms before adding.
+void advanceDerivative(vec2 a, float aLog, vec2 b, float bLog,
+ inout vec2 derivative, inout float logOffset) {
+ float productLog = logOffset + aLog;
+ float commonLog = dot(b, b) > 0.0 ? max(productLog, bLog) : productLog;
+ derivative = cmul(a, derivative) * exp(min(0.0, productLog - commonLog))
+  + b * exp(min(0.0, bLog - commonLog));
+ logOffset = commonLog;
+}
 void rescaleDerivative(inout vec2 derivative, inout float logOffset) {
 	float derivMagSq = dot(derivative, derivative);
 	if (isFiniteFloat(derivMagSq) && derivMagSq > DERIVATIVE_RESCALE_TRIGGER_SQ) {
@@ -268,22 +278,12 @@ ${
 					stripeEwma = stripeEwma * chunkDecay + (prefixAfter.y - prefixBefore.y * chunkDecay);
 					previousStripeEwma = stripeEwma;
 					// Reference running-min |Z|² across the skipped chunk.
-					minMagSq = min(minMagSq, prefixAfter.w);
+					minMagSq = min(minMagSq, blaB.w);
 					detailSamples += blaChunkSize;
 
-${
-	isJulia
-		? `					derivative = cmul(aMantissa, derivative);
-					derivativeLogOffset += float(aExp) * LOG_2;`
-		: `					vec2 aDerivative = cmul(aMantissa, derivative);
-					float aLogScale = derivativeLogOffset + float(aExp) * LOG_2;
-					float bLogScale = float(bExp) * LOG_2;
-					float commonLogScale = max(aLogScale, bLogScale);
-					float aDerivativeScale = exp(clamp(aLogScale - commonLogScale, -80.0, 0.0));
-					float bDerivativeScale = exp(clamp(bLogScale - commonLogScale, -80.0, 0.0));
-					derivative = aDerivative * aDerivativeScale + bMantissa * bDerivativeScale;
-					derivativeLogOffset = commonLogScale;`
-}
+advanceDerivative(aMantissa, float(aExp) * LOG_2,
+ ${isMandelbrot ? 'bMantissa, float(bExp) * LOG_2' : 'vec2(0.0), 0.0'},
+ derivative, derivativeLogOffset);
 					rescaleDerivative(derivative, derivativeLogOffset);
 
 					dx = newDx;
@@ -308,7 +308,7 @@ ${
 	if (isAnalytic && isQuadratic) {
 		scalarStep = `			float previousReferenceScale = safeExp2(float(orbitScalePrev));
 			vec2 previousZ = orbitCurrent.xy * previousReferenceScale + S * vec2(dx, dy);
-			derivative = cmul(vec2(2.0 * previousZ.x, 2.0 * previousZ.y), derivative)${isMandelbrot ? ' + vec2(1.0, 0.0)' : ''};
+			advanceDerivative(2.0 * previousZ, 0.0, ${isMandelbrot ? 'vec2(1.0, 0.0)' : 'vec2(0.0)'}, 0.0, derivative, derivativeLogOffset);
 			rescaleDerivative(derivative, derivativeLogOffset);
 
 			vec2 linearTerm = vec2(
@@ -406,21 +406,6 @@ ${
 			})}`;
 	}
 
-	const cycleCheckBlock = useCycleDetection
-		? `
-		// Brent-style cycle detection (no BLA in this variant, so every iteration runs
-		// scalar and interior pixels would otherwise burn the whole budget). Exact
-		// float32 equality of the reconstructed z keeps false positives out.
-		if (all(equal(vec2(fx, fy), tortoise))) {
-			break;
-		}
-		if (j == nextTortoiseUpdate) {
-			tortoise = vec2(fx, fy);
-			nextTortoiseUpdate *= 2;
-		}
-`
-		: '';
-
 	const escapedMetric = hasDerivative
 		? `FragColor = buildDistanceMetric(
 			smoothIters,
@@ -509,7 +494,7 @@ out vec4 FragColor;
 const float LOG_2 = 0.6931471805599453;
 ${GLSL_PACK_CONSTANTS}${GLSL_IS_FINITE}
 float safeExp2(float exponent) {
-	return exp2(clamp(exponent, -126.0, 126.0));
+	return exponent < -126.0 ? 0.0 : exp2(min(exponent, 126.0));
 }
 
 float downscaleToExponent(int sourceExponent, int targetExponent) {
@@ -566,14 +551,10 @@ ${
 	float stripeEwma = 0.5;
 	float previousStripeEwma = 0.5;
 ${hasDerivative ? '' : '	float detailTotal = 0.0;\n'}	float minMagSq = 1.0e30;
-${
-	useCycleDetection
-		? `	vec2 tortoise = vec2(1.0e30);
-	int nextTortoiseUpdate = 8;
-`
-		: ''
-}	int detailSamples = 0;
+	int detailSamples = 0;
 	bool escaped = false;
+	bool invalid = false;
+	int rebaseCount = 0;
 	int skippedIterations = 0;
 ${
 	hasDerivative
@@ -622,8 +603,7 @@ ${
 		}
 
 		if (!finiteMagnitude) {
-			smoothIters = float(j);
-			escaped = true;
+			invalid = true;
 			orbitCurrent = orbitNext;
 			break;
 		}
@@ -637,7 +617,7 @@ ${
 			orbitCurrent = orbitNext;
 			break;
 		}
-${cycleCheckBlock}
+
 		float perturbationDeltaSq = dx * dx + dy * dy;
 		if (isFiniteFloat(perturbationDeltaSq) && perturbationDeltaSq > BAILOUT_PERTURBATION_DELTA_SQ) {
 			dx *= 0.5;
@@ -646,30 +626,31 @@ ${cycleCheckBlock}
 			S = safeExp2(float(q));
 		}
 
-		// Iteration-extension rebase: when the reference orbit runs out, fold the current
-		// full z back into a fresh perturbation from orbit[0]. Mandelbrot's and Burning
-		// Ship's orbit[0] = 0, Julia's and Mandala's = the reference center; the fold math
-		// (dx, dy = fx - orbit0.xy * scale) generalises to all four. With long-orbit
-		// references (the normal case after the recent recompute headroom changes) this
-		// never fires. It only fires when the reference escaped early — in that case the
-		// z0-seeded formulas would otherwise show a solid view, since without the fold
-		// every still-unescaped pixel returns interiorMetric(). Post-rebase
-		// classifications carry per-pixel artifacts, but a blocky fractal is much more
-		// useful than a flat one.
-		if (k >= orbitLength - 1) {
-			float referenceStartScale = safeExp2(orbit0.z);
-			dx = fx - orbit0.x * referenceStartScale;
-			dy = fy - orbit0.y * referenceStartScale;
-			k = 0;
-			q = 0;
-			S = 1.0;
-			orbitNext = orbit0;
-		}
+		// Zero-seeded formulas can rebase before cancellation loses significant bits.
+${
+	hasDeltaC
+		? `
+        if (magnitudeSq < dot(S * vec2(dx, dy), S * vec2(dx, dy)) || k >= orbitLength - 1) {
+            dx = fx; dy = fy; k = 0; q = 0; S = 1.0;
+            normalizePerturbation(dx, dy, q); S = safeExp2(float(q));
+            orbitNext = orbit0; rebaseCount += 1;
+        }
+`
+		: `
+        // A rounded reconstruction is not an exact cycle or a valid new Julia seed.
+        float referenceMagSq = dot(orbitNext.xy * referenceScale, orbitNext.xy * referenceScale);
+        if (magnitudeSq < 1e-8 * referenceMagSq || k >= orbitLength - 1) {
+            invalid = true; break;
+        }
+`
+}
 
 		orbitCurrent = orbitNext;
 	}
 
-	if (escaped) {
+	if (invalid) {
+        FragColor = vec4(-1.0, 0.0, 0.0, -1.0);
+    } else if (escaped) {
 ${stripeRunoff}
 		${escapedMetric}
 	} else {
@@ -677,7 +658,7 @@ ${stripeRunoff}
 		// cardioid/bulb early-out look; everything else shades by min |z|.
 		FragColor = interiorMetric(${interiorArg});
 	}
-${diagnostic ? 'FragColor = vec4(float(skippedIterations), float(j), escaped ? 1.0 : 0.0, 1.0);' : ''}
+${diagnostic ? 'FragColor = vec4(float(skippedIterations), float(rebaseCount), invalid ? 1.0 : 0.0, escaped ? 1.0 : 0.0);' : ''}
 }
 `;
 }

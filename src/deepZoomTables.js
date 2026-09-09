@@ -8,7 +8,7 @@ export const ORBIT_TEXTURE_LENGTH = ORBIT_TEXTURE_PIXELS * ORBIT_TEXTURE_CHANNEL
 export const BLA_BASE_CHUNK_SIZE = 32;
 export const BLA_MAX_LEVELS = 7;
 export const BLA_LEVEL_STRIDE = 65536;
-export const BLA_VALIDITY_EPSILON = 1e-3;
+export const BLA_VALIDITY_EPSILON = 1e-6;
 export const BLA_INVALID_RSQ_LOG2 = -1.0e30;
 export const BLA_FLOATS_PER_ENTRY = 8;
 export const BLA_TEXELS_PER_ENTRY = 2;
@@ -68,6 +68,7 @@ function invalidEntry() {
 		a: { mantR: 0, mantI: 0, exp: 0 },
 		b: { mantR: 0, mantI: 0, exp: 0 },
 		validityRsqLog2: BLA_INVALID_RSQ_LOG2,
+		minMagSq: 1e30,
 	};
 }
 
@@ -83,6 +84,7 @@ export function composeBLAEntries(left, right) {
 	return {
 		a,
 		b,
+		minMagSq: Math.min(left.minMagSq, right.minMagSq),
 		validityRsqLog2: Math.min(left.validityRsqLog2, rightAdjustedValidity),
 	};
 }
@@ -95,8 +97,14 @@ export function buildDirectBLAEntry(orbit, start, chunkSize = BLA_BASE_CHUNK_SIZ
 	let a = { mantR: 1, mantI: 0, exp: 0 };
 	let b = { mantR: 0, mantI: 0, exp: 0 };
 	let minRSqLog2 = Infinity;
+	let minMagSq = 1e30;
 
 	for (let n = 0; n < chunkSize; n++) {
+		const next = (start + n + 1) * 3;
+		if (next + 2 < orbit.length) {
+			const scale = Math.pow(2, orbit[next + 2]);
+			minMagSq = Math.min(minMagSq, (orbit[next] ** 2 + orbit[next + 1] ** 2) * scale ** 2);
+		}
 		const src = (start + n) * 3;
 		const zMantR = orbit[src];
 		const zMantI = orbit[src + 1];
@@ -123,6 +131,7 @@ export function buildDirectBLAEntry(orbit, start, chunkSize = BLA_BASE_CHUNK_SIZ
 	return {
 		a,
 		b,
+		minMagSq,
 		validityRsqLog2: minRSqLog2 === Infinity || minRSqLog2 === -Infinity ? BLA_INVALID_RSQ_LOG2 : minRSqLog2,
 	};
 }
@@ -136,6 +145,7 @@ export function readBLAEntry(data, level, index) {
 	return {
 		a: { mantR: data[offset], mantI: data[offset + 1], exp: data[offset + 2] },
 		validityRsqLog2: data[offset + 3],
+		minMagSq: data[offset + 7],
 		b: { mantR: data[offset + 4], mantI: data[offset + 5], exp: data[offset + 6] },
 	};
 }
@@ -149,7 +159,7 @@ export function writeBLAEntry(data, level, index, entry) {
 	data[offset + 4] = entry.b.mantR;
 	data[offset + 5] = entry.b.mantI;
 	data[offset + 6] = entry.b.exp;
-	data[offset + 7] = 0;
+	data[offset + 7] = entry.minMagSq ?? 1e30;
 }
 
 export function buildHierarchicalBLATable(orbit, { maxLevels = BLA_MAX_LEVELS } = {}) {
