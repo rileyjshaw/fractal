@@ -30,23 +30,23 @@ import { debounce, hexToNormalizedRGB, identity, parseNumber, srgbToLinear, upda
 import { getUrlCenterFractionDigits, serializeStateValueForHash } from './urlHash.js';
 import { getApproximateZoomScale } from './viewMath.js';
 import { bindPointerControls } from './ui/pointerControls.js';
-import { DeepZoomManager } from './deepZoom.js';
+import { ReferenceService } from './deep/referenceService.js';
 import { N_COLORS } from './shaderCommon.js';
 import { stateFromHash } from './state/urlState.js';
 import { validateStatePatch } from './state/viewState.js';
 import { precisionForView } from './math/precision.js';
-import { describeFrame } from './render/frame.js';
-import { repairMetrics } from './render/metric.js';
+import { describeFrame, frameCompatible } from './render/frame.js';
 import * as profiler from './profiler.js';
 
 export function startApp() {
-	const deepZoomManager = new DeepZoomManager({ threshold: DEEP_ZOOM_THRESHOLD });
+	const deepZoomManager = new ReferenceService({ threshold: DEEP_ZOOM_THRESHOLD });
 
 	let resolutionMultiplier = window.devicePixelRatio || 1;
 	let standardIterationRenderer = null;
 	let deepIterationRenderer = null;
 	let deepMetricSource = null;
 	let deepFrame = null;
+	let pendingDeepSignature = null;
 	let displayRenderer = null;
 	let lastStandardIterationRenderSignature = null;
 	let lastDeepIterationRenderSignature = null;
@@ -676,7 +676,7 @@ export function startApp() {
 		if (canRenderDeep) {
 			deepIterationRenderer = resources.deepPass(renderState, deepZoomManager);
 			const signature = getDeepIterationRenderSignature(renderState);
-			if (lastDeepIterationRenderSignature !== signature) {
+			if (lastDeepIterationRenderSignature !== signature && pendingDeepSignature !== signature) {
 				const previewTransform = getDeepPreviewTransform(renderState);
 				if (shouldDeferDeepStepForPreview(previewTransform)) {
 					deepPreviewTransform = previewTransform;
@@ -685,27 +685,45 @@ export function startApp() {
 					profiler.measureGL('deep:iterStep (GPU)', () => deepIterationRenderer.step());
 					const metric = resources.readDeepMetrics();
 					const pixels = metric.data;
-					const repaired = repairMetrics(
-						deepZoomManager.gmp,
-						pixels,
-						renderState,
-						canvas.width,
-						canvas.height,
-					);
-					profiler.note('deep:repairedPixels', repaired);
-					deepMetricSource = metric;
-					deepFrame = describeFrame(
-						renderState,
-						canvas.width,
-						canvas.height,
-						deepZoomManager.referenceSignature,
-					);
-					lastDeepIterationRenderSignature = signature;
-					setDeepMetricAnchor(renderState);
+					const publish = source => {
+						deepMetricSource = source;
+						deepFrame = describeFrame(
+							renderState,
+							source.width,
+							source.height,
+							deepZoomManager.referenceSignature,
+						);
+						lastDeepIterationRenderSignature = signature;
+						setDeepMetricAnchor(renderState);
+					};
+					if (pixels.some((value, index) => index % 4 === 3 && value < 0)) {
+						pendingDeepSignature = signature;
+						deepZoomManager
+							.repairFrame(metric, renderState)
+							.then(result => {
+								if (getDeepIterationRenderSignature(getRenderState()) === signature) {
+									publish(result.metric);
+									profiler.note('deep:repairedPixels', result.repairedPixels);
+								}
+							})
+							.catch(error => {
+								if (error.name !== 'AbortError') showError(error.message);
+							})
+							.finally(() => {
+								if (pendingDeepSignature === signature) pendingDeepSignature = null;
+							});
+					} else {
+						deepZoomManager.repairs.cancel();
+						pendingDeepSignature = null;
+						publish(metric);
+					}
 					profiler.note('deep:u_iterations', renderState.deepIterations);
 				}
 			}
 			iterationRenderer = deepMetricSource;
+			if (pendingDeepSignature) deepPreviewTransform = getDeepPreviewTransform(renderState);
+			if (!deepFrame || !frameCompatible(deepFrame, renderState, canvas.width, canvas.height))
+				iterationRenderer = null;
 		} else if (frameChoice === 'held') {
 			iterationRenderer = deepMetricSource;
 			deepPreviewTransform = getDeepPreviewTransform(renderState);
@@ -721,6 +739,12 @@ export function startApp() {
 			iterationRenderer = standardIterationRenderer;
 		}
 
+		if (!iterationRenderer) {
+			standardIterationRenderer = resources.standardPass(renderState);
+			standardIterationRenderer.step();
+			iterationRenderer = standardIterationRenderer;
+			deepPreviewTransform = null;
+		}
 		displayRenderer = resources.displayPass(
 			renderState,
 			iterationRenderer,
@@ -737,6 +761,9 @@ export function startApp() {
 				mode: iterationRenderer === deepMetricSource ? 'deep' : 'standard',
 				reference: deepZoomManager.referenceSignature,
 				frame: lastDeepIterationRenderSignature,
+				workerDurationMs: deepZoomManager.workerDurationMs,
+				textureBytes: deepZoomManager.textureBytes,
+				pending: pendingDeepSignature,
 			};
 		profiler.tick(time);
 		requestAnimationFrame(render);

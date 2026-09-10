@@ -156,3 +156,14 @@ test('visual prefix min channel carries the running orbit |z|² minimum', () => 
 
 	assert.ok(prefix[3] > 1e29);
 });
+
+test('compact BLA layouts preserve coefficients and interval minima', () => {
+	const orbit = buildOrbit(160);
+	const full = buildHierarchicalBLATable(orbit);
+	const compact = buildHierarchicalBLATable(orbit, { compact: true });
+	assert.ok(compact.byteLength < full.byteLength / 100);
+	for (const level of [0, 1, 2])
+		for (const index of [1, 8, 16]) {
+			assert.deepEqual(readBLAEntry(compact, level, index), readBLAEntry(full, level, index));
+		}
+});

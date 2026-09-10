@@ -172,7 +172,8 @@ void rescaleDerivative(inout vec2 derivative, inout float logOffset) {
 // Returns the two BLA texels for orbit position k. .a member of texel A holds
 // the validity threshold log2(R²); .a of texel B is unused.
 void getBLA(int level, int k, out vec4 entryA, out vec4 entryB) {
-	int entryIndex = level * BLA_LEVEL_STRIDE + k;
+	int stride = textureSize(u_blaTable, 0).x * textureSize(u_blaTable, 0).y / (${BLA_MAX_LEVELS} * 2);
+	int entryIndex = level * stride + k;
 	int texelA = entryIndex * 2;
 	int rowA = texelA / BLA_TEXTURE_WIDTH;
 	int colA = texelA - rowA * BLA_TEXTURE_WIDTH;

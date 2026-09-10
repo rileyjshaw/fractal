@@ -136,12 +136,12 @@ export function buildDirectBLAEntry(orbit, start, chunkSize = BLA_BASE_CHUNK_SIZ
 	};
 }
 
-export function getBLAEntryOffset(level, index) {
-	return (level * BLA_LEVEL_STRIDE + index) * BLA_FLOATS_PER_ENTRY;
+export function getBLAEntryOffset(level, index, stride = BLA_LEVEL_STRIDE) {
+	return (level * stride + index) * BLA_FLOATS_PER_ENTRY;
 }
 
 export function readBLAEntry(data, level, index) {
-	const offset = getBLAEntryOffset(level, index);
+	const offset = getBLAEntryOffset(level, index, data.stride);
 	return {
 		a: { mantR: data[offset], mantI: data[offset + 1], exp: data[offset + 2] },
 		validityRsqLog2: data[offset + 3],
@@ -151,7 +151,7 @@ export function readBLAEntry(data, level, index) {
 }
 
 export function writeBLAEntry(data, level, index, entry) {
-	const offset = getBLAEntryOffset(level, index);
+	const offset = getBLAEntryOffset(level, index, data.stride);
 	data[offset] = entry.a.mantR;
 	data[offset + 1] = entry.a.mantI;
 	data[offset + 2] = entry.a.exp;
@@ -162,19 +162,23 @@ export function writeBLAEntry(data, level, index, entry) {
 	data[offset + 7] = entry.minMagSq ?? 1e30;
 }
 
-export function buildHierarchicalBLATable(orbit, { maxLevels = BLA_MAX_LEVELS } = {}) {
+export function buildHierarchicalBLATable(orbit, { maxLevels = BLA_MAX_LEVELS, compact = false } = {}) {
 	const orbitLength = Math.floor(orbit.length / 3);
 	const levels = Math.max(1, Math.min(BLA_MAX_LEVELS, maxLevels));
-	const data = new Float32Array(BLA_TEXTURE_LENGTH);
+	const stride = compact
+		? Math.min(BLA_LEVEL_STRIDE, Math.max(512, 2 ** Math.ceil(Math.log2(Math.max(1, orbitLength)))))
+		: BLA_LEVEL_STRIDE;
+	const data = new Float32Array(stride * BLA_MAX_LEVELS * BLA_FLOATS_PER_ENTRY);
+	data.stride = stride;
 
-	for (let entry = 0; entry < BLA_LEVEL_STRIDE * BLA_MAX_LEVELS; entry++) {
+	for (let entry = 0; entry < stride * BLA_MAX_LEVELS; entry++) {
 		data[entry * BLA_FLOATS_PER_ENTRY + 3] = BLA_INVALID_RSQ_LOG2;
 	}
 
 	for (let level = 0; level < levels; level++) {
 		const chunkSize = BLA_BASE_CHUNK_SIZE << level;
 		const previousChunkSize = chunkSize >> 1;
-		const maxIndex = Math.min(BLA_LEVEL_STRIDE, orbitLength);
+		const maxIndex = Math.min(stride, orbitLength);
 
 		for (let index = 0; index < maxIndex; index++) {
 			if (index + chunkSize > orbitLength) break;
@@ -207,7 +211,9 @@ export function stripeAverageAddend(x, y) {
 export function buildVisualPrefixTextureData(orbit) {
 	const orbitLength = Math.floor(orbit.length / 3);
 	const capacity = Math.min(orbitLength, ORBIT_TEXTURE_PIXELS);
-	const data = new Float32Array(ORBIT_TEXTURE_LENGTH);
+	const data = new Float32Array(
+		Math.max(1, Math.ceil(capacity / ORBIT_TEXTURE_SIZE)) * ORBIT_TEXTURE_SIZE * ORBIT_TEXTURE_CHANNELS,
+	);
 	let detailTotal = 0;
 	let stripeEwma = 0.5;
 	let lastStripeValue = 0.5;

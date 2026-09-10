@@ -111,3 +111,25 @@ window.compileVariants = () => {
 	return 121;
 };
 window.ready = true;
+window.workerProbe = async state => {
+	const { ReferenceService } = await import('../../src/deep/referenceService.js');
+	const service = new ReferenceService();
+	let frames = 0,
+		running = true;
+	const tick = () => {
+		frames++;
+		if (running) requestAnimationFrame(tick);
+	};
+	requestAnimationFrame(tick);
+	try {
+		await service.initialize();
+		await service.ensureReference(state);
+		running = false;
+		await manager.ensureReference(state);
+		const same = service.orbitTextureData.every((value, index) => value === manager.orbitTextureData[index]);
+		return { frames, same, textureBytes: service.textureBytes, workerDurationMs: service.workerDurationMs };
+	} finally {
+		running = false;
+		service.cleanup();
+	}
+};

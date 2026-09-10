@@ -111,3 +111,12 @@ test('application presents a completed deep frame without WebGL errors', async (
 	await page.screenshot({ path: 'output/playwright/circular-seam-fixed.png' });
 	expect(errors).toEqual([]);
 });
+
+test('worker references match local computation while animation continues', async ({ page }, testInfo) => {
+	const result = await page.evaluate(f => window.workerProbe(f), fixture);
+	expect(result.same).toBe(true);
+	expect(result.frames).toBeGreaterThan(1);
+	expect(result.textureBytes).toBeLessThan(8 * 1024 * 1024);
+	await testInfo.attach('worker-performance.json', { body: JSON.stringify(result), contentType: 'application/json' });
+	console.log(result);
+});

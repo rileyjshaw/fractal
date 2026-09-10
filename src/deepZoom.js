@@ -3,11 +3,8 @@ import { GMPUtils } from './gmpUtils.js';
 import * as profiler from './profiler.js';
 import {
 	BLA_MAX_LEVELS,
-	BLA_TEXTURE_LENGTH,
 	BLA_TEXTURE_WIDTH,
-	BLA_TEXTURE_HEIGHT,
 	ORBIT_TEXTURE_CHANNELS,
-	ORBIT_TEXTURE_LENGTH,
 	ORBIT_TEXTURE_PIXELS,
 	ORBIT_TEXTURE_SIZE,
 	buildHierarchicalBLATable,
@@ -273,7 +270,9 @@ export class DeepZoomManager {
 		// step (x, y, scale, 0). One fetch per inner-loop iteration replaces three.
 		const orbitSteps = Math.floor(orbit.length / 3);
 		const capacity = Math.min(orbitSteps, ORBIT_TEXTURE_PIXELS);
-		const textureData = new Float32Array(ORBIT_TEXTURE_LENGTH);
+		const textureData = new Float32Array(
+			Math.max(1, Math.ceil(capacity / ORBIT_TEXTURE_SIZE)) * ORBIT_TEXTURE_SIZE * ORBIT_TEXTURE_CHANNELS,
+		);
 		for (let i = 0; i < capacity; i++) {
 			const src = i * 3;
 			const dst = i * ORBIT_TEXTURE_CHANNELS;
@@ -289,7 +288,7 @@ export class DeepZoomManager {
 		return {
 			data: this.orbitTextureData,
 			width: ORBIT_TEXTURE_SIZE,
-			height: ORBIT_TEXTURE_SIZE,
+			height: this.orbitTextureData.length / (ORBIT_TEXTURE_SIZE * ORBIT_TEXTURE_CHANNELS),
 		};
 	}
 
@@ -300,7 +299,7 @@ export class DeepZoomManager {
 		return {
 			data: this.blaTableData,
 			width: BLA_TEXTURE_WIDTH,
-			height: BLA_TEXTURE_HEIGHT,
+			height: this.blaTableData.length / (BLA_TEXTURE_WIDTH * 4),
 		};
 	}
 
@@ -309,7 +308,7 @@ export class DeepZoomManager {
 		return {
 			data: this.visualPrefixTextureData,
 			width: ORBIT_TEXTURE_SIZE,
-			height: ORBIT_TEXTURE_SIZE,
+			height: this.visualPrefixTextureData.length / (ORBIT_TEXTURE_SIZE * ORBIT_TEXTURE_CHANNELS),
 		};
 	}
 
@@ -483,11 +482,11 @@ export class DeepZoomManager {
 						buildVisualPrefixTextureData(referenceData.orbit),
 					);
 					this.blaTableData = profiler.measure('ref:buildBLAHierarchy', () =>
-						buildHierarchicalBLATable(referenceData.orbit),
+						buildHierarchicalBLATable(referenceData.orbit, { compact: true }),
 					);
 					profiler.note('ref:blaLevels', BLA_MAX_LEVELS);
-					profiler.note('ref:blaTextureMB', (BLA_TEXTURE_LENGTH * 4) / (1024 * 1024));
-					profiler.note('ref:visualPrefixTextureMB', (ORBIT_TEXTURE_LENGTH * 4) / (1024 * 1024));
+					profiler.note('ref:blaTextureMB', this.blaTableData.byteLength / (1024 * 1024));
+					profiler.note('ref:visualPrefixTextureMB', this.visualPrefixTextureData.byteLength / (1024 * 1024));
 				} else {
 					this.visualPrefixTextureData = null;
 					this.blaTableData = null;

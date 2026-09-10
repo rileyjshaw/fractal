@@ -2,7 +2,7 @@ import { precisionForView } from './math/precision.js';
 import { init } from 'gmp-wasm';
 
 const DEFAULT_PRECISION = 1200;
-const ORBIT_CAPACITY = Math.floor((1024 * 1024) / 3);
+const ORBIT_CAPACITY = 65536 + 34; // Max render budget plus metric runoff.
 const FRACTAL_TYPE_JULIA = 0;
 const FRACTAL_TYPE_MANDELBROT = 1;
 const FRACTAL_TYPE_BURNING_SHIP = 2;
