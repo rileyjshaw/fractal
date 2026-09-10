@@ -29,14 +29,23 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: 'npm'
       - name: Install dependencies
         run: npm ci
-      - name: Check formatting
-        run: npm run format:check
-      - name: Run tests
-        run: npm test
+      - name: Static checks, unit tests, and production build
+        run: npm run check
+      - name: Install browser
+        run: npx playwright install --with-deps chromium
+      - name: WebGL regressions
+        run: npm run test:gpu
+      - name: Preserve GPU diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-diagnostics
+          path: output/playwright/
+          retention-days: 7
 
   deploy:
     # Only deploy from main; PRs run the test job above but never publish.
@@ -56,10 +65,10 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: 'npm'
       - name: Install dependencies
-        run: npm install
+        run: npm ci
       - name: Build
         run: npm run build
       - name: Setup Pages

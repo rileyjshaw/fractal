@@ -1,12 +1,14 @@
+import {
+	FRACTAL_TYPE_JULIA,
+	FRACTAL_TYPE_MANDELBROT,
+	FRACTAL_TYPE_BURNING_SHIP,
+	FRACTAL_TYPE_MANDALA,
+} from './domain/formulas.js';
 import { precisionForView } from './math/precision.js';
 import { init } from 'gmp-wasm';
 
 const DEFAULT_PRECISION = 1200;
 const ORBIT_CAPACITY = 65536 + 34; // Max render budget plus metric runoff.
-const FRACTAL_TYPE_JULIA = 0;
-const FRACTAL_TYPE_MANDELBROT = 1;
-const FRACTAL_TYPE_BURNING_SHIP = 2;
-const FRACTAL_TYPE_MANDALA = 3;
 // The deep shader's stripe runoff follows escaped pixels out to |z| > 64 (the stripe
 // bailout), so reference orbits must extend at least that far past the user's escape
 // radius rather than stopping at the old |z| > 20 threshold.
@@ -235,7 +237,7 @@ export class GMPUtils {
 		}
 
 		this.ensureViewPrecision(centerReal, centerImag, radiusExact);
-		const orbit = new Float32Array(Math.min(iterations, ORBIT_CAPACITY) * 3);
+		const orbit = new Float32Array(Math.min(iterations + 1, ORBIT_CAPACITY) * 3);
 		let x = null;
 		let y = null;
 		let cx = null;
@@ -331,6 +333,18 @@ export class GMPUtils {
 
 				actualIterations = i + 1;
 				if (this.binding.mpfr_get_d(escapeMagnitude, 0) > REFERENCE_ESCAPE_MAGNITUDE_SQ) {
+					// Include the escaped endpoint, including a first-step escape
+					// at high powers. Otherwise the pixel oracle could see only z0.
+					if (actualIterations < orbit.length / 3) {
+						const xe = this.binding.mpfr_get_exp(x),
+							ye = this.binding.mpfr_get_exp(y),
+							e = Math.max(xe, ye);
+						const dst = actualIterations * 3;
+						orbit[dst] = this.binding.mpfr_get_d_2exp(exponentPointer, x, 0) / Math.pow(2, e - xe);
+						orbit[dst + 1] = this.binding.mpfr_get_d_2exp(exponentPointer, y, 0) / Math.pow(2, e - ye);
+						orbit[dst + 2] = e;
+						actualIterations++;
+					}
 					break;
 				}
 			}

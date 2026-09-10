@@ -97,7 +97,7 @@ test('visual prefix stripe channel follows the shared EWMA recurrence', () => {
 	const prefix = buildVisualPrefixTextureData(orbit);
 	let detailTotal = 0;
 	let stripeEwma = 0.5;
-	let lastStripeValue = 0.5;
+	let lastStripeValue;
 
 	assert.equal(prefix[1], 0.5);
 

@@ -1,10 +1,11 @@
+import { MIN_EXPONENT, MAX_EXPONENT, FORMULAS } from '../domain/formulas.js';
 import { decimalOrder, logDecimal } from '../math/precision.js';
 import { getRadiusExactForZoom } from '../viewMath.js';
 export const MAX_ZOOM = 400 / Math.log10(2);
 const limits = {
 	zoom: [0, MAX_ZOOM],
-	exponent: [2, 16],
-	fractalType: [0, 3],
+	exponent: [MIN_EXPONENT, MAX_EXPONENT],
+	fractalType: [0, FORMULAS.length - 1],
 	cReal: [-2.5, 2.5],
 	cImaginary: [-2.5, 2.5],
 	escapeRadius: [0.8, 2],

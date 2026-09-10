@@ -18,11 +18,10 @@ export function metricFromOrbit(orbit, state) {
 		dy = 0,
 		logD = 0;
 	let stripe = 0.5,
-		previous = 0.5,
+		previous,
 		min = 1e30,
 		detail = 0,
-		escape = null,
-		samples = 0;
+		escape = null;
 	const point = i => [orbit[i * 3] * 2 ** orbit[i * 3 + 2], orbit[i * 3 + 1] * 2 ** orbit[i * 3 + 2]];
 	for (let i = 1; i < orbit.length / 3; i++) {
 		const [x, y] = point(i),
@@ -42,13 +41,12 @@ export function metricFromOrbit(orbit, state) {
 		}
 		previous = stripe;
 		stripe += (0.5 + 0.5 * Math.sin(8 * Math.atan2(y, x)) - stripe) * STRIPE_EWMA_ALPHA;
-		samples++;
 		min = Math.min(min, mag * mag);
 		detail += 1 / (1 + mag * mag);
 		if (!escape && mag > state.escapeRadius) {
 			const denominator = Math.abs(Math.log(state.escapeRadius)) < 1e-6 ? 1e-6 : Math.log(state.escapeRadius);
 			const ratio = Math.log(mag) / denominator;
-			const smooth = i - Math.log(Math.max(ratio, 1e-6)) / Math.log(state.exponent);
+			const smooth = i - clamp(Math.log2(Math.max(ratio, 1e-6)), -1, 2);
 			let normal = analytic ? Math.atan2(y * dx - x * dy, x * dx + y * dy) : -1;
 			if (analytic && normal < 0) normal += 2 * Math.PI;
 			let brightness;

@@ -46,15 +46,15 @@ export function updateHash(hash) {
  *   x = trigger
  *
  *   With default arguments:
- *   • • • •      • • • •
+ *   • • • •      • • • •
  *           x            x
  *
  *   With triggerFirstCall = true, triggerLastCall = true:
- *   • • • •      • • • •
+ *   • • • •      • • • •
  *   x       x    x       x
  *
  *   With triggerFirstCall = true, triggerLastCall = false:
- *   • • • •      • • • •
+ *   • • • •      • • • •
  *   x            x
  */
 export function debounce(fn, ms, { triggerFirstCall = false, triggerLastCall = true } = {}) {

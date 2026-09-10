@@ -1,8 +1,5 @@
+import { FRACTAL_TYPE_JULIA, FRACTAL_TYPE_MANDELBROT, FRACTAL_TYPE_BURNING_SHIP } from './domain/formulas.js';
 import { GLSL_IS_FINITE, GLSL_METRIC_SHARED, GLSL_PACK_CONSTANTS, N_COLORS } from './shaderCommon.js';
-
-const FRACTAL_TYPE_JULIA = 0;
-const FRACTAL_TYPE_MANDELBROT = 1;
-const FRACTAL_TYPE_BURNING_SHIP = 2;
 
 // z^N as an unrolled cmul chain. The exponent is baked into the shader variant, so the
 // compiler sees straight-line code with no loop and no dynamic exponent uniform.

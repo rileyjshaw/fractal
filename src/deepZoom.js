@@ -1,3 +1,9 @@
+import {
+	FRACTAL_TYPE_JULIA,
+	FRACTAL_TYPE_MANDELBROT,
+	FRACTAL_TYPE_BURNING_SHIP,
+	FRACTAL_TYPE_MANDALA,
+} from './domain/formulas.js';
 import { precisionForView } from './math/precision.js';
 import { GMPUtils } from './gmpUtils.js';
 import * as profiler from './profiler.js';
@@ -11,10 +17,6 @@ import {
 	buildVisualPrefixTextureData,
 } from './deepZoomTables.js';
 
-const FRACTAL_TYPE_JULIA = 0;
-const FRACTAL_TYPE_MANDELBROT = 1;
-const FRACTAL_TYPE_BURNING_SHIP = 2;
-const FRACTAL_TYPE_MANDALA = 3;
 const SUPPORTED_FRACTAL_TYPES = new Set([
 	FRACTAL_TYPE_JULIA,
 	FRACTAL_TYPE_MANDELBROT,

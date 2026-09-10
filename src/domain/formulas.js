@@ -1,3 +1,7 @@
+export const FRACTAL_TYPE_JULIA = 0;
+export const FRACTAL_TYPE_MANDELBROT = 1;
+export const FRACTAL_TYPE_BURNING_SHIP = 2;
+export const FRACTAL_TYPE_MANDALA = 3;
 export const FORMULAS = Object.freeze([
 	{ name: 'Julia', seedsFromCenter: true, folded: false },
 	{ name: 'Mandelbrot', seedsFromCenter: false, folded: false },

@@ -1,4 +1,10 @@
 import {
+	FRACTAL_TYPE_JULIA,
+	FRACTAL_TYPE_MANDELBROT,
+	FRACTAL_TYPE_BURNING_SHIP,
+	FRACTAL_TYPE_MANDALA,
+} from './domain/formulas.js';
+import {
 	BLA_BASE_CHUNK_SIZE,
 	BLA_LEVEL_STRIDE,
 	BLA_MAX_LEVELS,
@@ -12,11 +18,6 @@ import {
 	N_COLORS,
 	STRIPE_EWMA_ALPHA,
 } from './shaderCommon.js';
-
-const FRACTAL_TYPE_JULIA = 0;
-const FRACTAL_TYPE_MANDELBROT = 1;
-const FRACTAL_TYPE_BURNING_SHIP = 2;
-const FRACTAL_TYPE_MANDALA = 3;
 
 // Exact integer binomial coefficients C(n, 0..n); n ≤ 16 keeps every value (max
 // C(16,8) = 12870) exactly representable in float32, so they can be emitted as
@@ -114,7 +115,6 @@ export function generatePerturbationShader({
 	const isShip = fractalType === FRACTAL_TYPE_BURNING_SHIP;
 	const isMandala = fractalType === FRACTAL_TYPE_MANDALA;
 	const isAnalytic = isJulia || isMandelbrot;
-	const isFolded = isShip || isMandala;
 	const isQuadratic = exponent === 2;
 	// Julia and Mandala iterate from z0 = pixel, so the delta seeds z; Mandelbrot and
 	// Burning Ship iterate from the critical point with c = pixel, so it seeds c.
@@ -554,7 +554,7 @@ ${
 ${hasDerivative ? '' : '	float detailTotal = 0.0;\n'}	float minMagSq = 1.0e30;
 	int detailSamples = 0;
 	bool escaped = false;
-	bool invalid = false;
+	bool invalid = orbitLength < 2;
 	int rebaseCount = 0;
 	int skippedIterations = 0;
 ${

@@ -117,3 +117,10 @@ test('power-3 Burning Ship reference orbit conjugates the center and folds befor
 		64,
 	);
 });
+
+test('first-step high-power escapes retain the endpoint for classification', () => {
+	const { orbit, orbitLength } = gmp.computeReferenceData('1.4', '.1', 128, { fractalType: 0, exponent: 16 });
+	assert.equal(orbitLength, 2);
+	const [x, y] = orbitEntry(orbit, 1);
+	assert.ok(x * x + y * y > 64 * 64);
+});

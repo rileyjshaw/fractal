@@ -25,6 +25,7 @@ import { createFullscreenCanvas, save } from 'shaderpad/util';
 import { bindKeyboardControls } from './ui/controls.js';
 import { Tween, Easing } from '@tweenjs/tween.js';
 
+import { paletteNoise } from './render/paletteNoise.js';
 import palettes, { paletteIds } from './palettes.js';
 import { debounce, hexToNormalizedRGB, identity, parseNumber, srgbToLinear, updateHash } from './util.js';
 import { getUrlCenterFractionDigits, serializeStateValueForHash } from './urlHash.js';
@@ -269,7 +270,7 @@ export function startApp() {
 			const rgbComponents = [...normalizedPalette[i % normalizedPalette.length]];
 			if (i >= normalizedPalette.length) {
 				for (let j = 0; j < rgbComponents.length; ++j) {
-					rgbComponents[j] = Math.max(0, Math.min(1, rgbComponents[j] + Math.random() * 0.1 - 0.05));
+					rgbComponents[j] = Math.max(0, Math.min(1, rgbComponents[j] + paletteNoise(paletteId, i, j)));
 				}
 			}
 			const offset = i * 3;
@@ -761,6 +762,9 @@ export function startApp() {
 				mode: iterationRenderer === deepMetricSource ? 'deep' : 'standard',
 				reference: deepZoomManager.referenceSignature,
 				frame: lastDeepIterationRenderSignature,
+				formula: deepFrame?.formula,
+				width: canvas.width,
+				height: canvas.height,
 				workerDurationMs: deepZoomManager.workerDurationMs,
 				textureBytes: deepZoomManager.textureBytes,
 				pending: pendingDeepSignature,

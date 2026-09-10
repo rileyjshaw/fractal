@@ -120,3 +120,59 @@ test('worker references match local computation while animation continues', asyn
 	await testInfo.attach('worker-performance.json', { body: JSON.stringify(result), contentType: 'application/json' });
 	console.log(result);
 });
+
+test('representative formulas agree with shallow rendering and direct repair', async ({ page }) => {
+	for (const [fractalType, exponent] of [
+		[0, 2],
+		[2, 2],
+		[3, 2],
+		[1, 3],
+		[0, 16],
+		[2, 3],
+	]) {
+		const state = {
+			...fixture,
+			fractalType,
+			exponent,
+			centerRealExact: '1.4',
+			centerImagExact: '.1',
+			radiusExact: '.03125',
+			width: 12,
+			height: 8,
+			iterations: 128,
+			deepIterations: 128,
+		};
+		const result = await page.evaluate(
+			async f => ({
+				standard: await window.renderFixture(f, { standard: true }),
+				deep: await window.renderFixture(f, { repair: true }),
+				repaired: await window.renderFixture(f, { forceRepair: true }),
+			}),
+			state,
+		);
+		expect(result.repaired.repaired).toBe(96);
+		for (let i = 0; i < result.standard.pixels.length; i += 4) {
+			for (const image of [result.deep, result.repaired]) {
+				expect(image.pixels[i + 3]).toBeGreaterThanOrEqual(0);
+				expect(Math.abs(image.pixels[i] - result.standard.pixels[i])).toBeLessThan(0.01);
+			}
+		}
+	}
+});
+
+test('application handles formula switches, toggles and resize', async ({ page }) => {
+	const errors = [];
+	page.on('pageerror', e => errors.push(e.message));
+	await page.goto('http://127.0.0.1:5173/fractal/#F=1_E=2_P=0_H=0_A=1.4_B=.1_W=1e-8_Z=27.5754247590989');
+	await page.waitForFunction(() => window.fractalDiagnostics?.mode === 'deep');
+	for (const key of ['f', 'e', 'n', 'a']) await page.keyboard.press(key);
+	await page.setViewportSize({ width: 400, height: 640 });
+	await page.waitForFunction(
+		() =>
+			window.fractalDiagnostics?.mode === 'deep' &&
+			window.fractalDiagnostics.formula === '2|3' &&
+			window.fractalDiagnostics.width === 400 &&
+			window.fractalDiagnostics.height === 640,
+	);
+	expect(errors).toEqual([]);
+});

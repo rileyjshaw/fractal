@@ -1,3 +1,4 @@
+import { repairMetrics } from '../../src/render/metric.js';
 import { DeepZoomManager } from '../../src/deepZoom.js';
 import { generatePerturbationShader } from '../../src/perturbationShader.js';
 import { generateStandardShader } from '../../src/standardShader.js';
@@ -49,7 +50,9 @@ window.renderFixture = async (state, options = {}) => {
 	const { width, height } = state;
 	canvas.width = width;
 	canvas.height = height;
-	const p = program(generatePerturbationShader({ ...state, ...options }));
+	const p = program(
+		(options.standard ? generateStandardShader : generatePerturbationShader)({ ...state, ...options }),
+	);
 	gl.useProgram(p);
 	const textures = [];
 	let unit = 0;
@@ -83,11 +86,19 @@ window.renderFixture = async (state, options = {}) => {
 	}))
 		gl.uniform1i(gl.getUniformLocation(p, name), value);
 	for (const [name, value] of Object.entries({
+		u_zoom: 2 / Number(state.radiusExact),
+		u_cReal: state.cReal,
+		u_cImaginary: state.cImaginary,
 		u_radiusMantissa: mantissa,
 		u_escapeRadius: state.escapeRadius,
 		u_logEscapeRadius: Math.log(state.escapeRadius),
 	}))
 		gl.uniform1f(gl.getUniformLocation(p, name), value);
+	gl.uniform2f(
+		gl.getUniformLocation(p, 'u_center'),
+		Number(state.centerRealExact) / 2,
+		Number(state.centerImagExact) / 2,
+	);
 	gl.uniform2f(gl.getUniformLocation(p, 'u_resolution'), width, height);
 	gl.uniform2f(gl.getUniformLocation(p, 'u_referenceOffset'), offset.offsetReal, offset.offsetImag);
 	gl.viewport(0, 0, width, height);
@@ -99,7 +110,10 @@ window.renderFixture = async (state, options = {}) => {
 	for (const t of textures) gl.deleteTexture(t);
 	gl.deleteProgram(p);
 	if (error !== gl.NO_ERROR) throw Error(`WebGL error ${error}`);
-	return { pixels: Array.from(pixels), reference: manager.referenceState };
+	if (options.forceRepair) for (let i = 3; i < pixels.length; i += 4) pixels[i] = -1;
+	const repaired =
+		options.repair || options.forceRepair ? repairMetrics(manager.gmp, pixels, state, width, height) : 0;
+	return { pixels: Array.from(pixels), reference: manager.referenceState, repaired };
 };
 window.compileVariants = () => {
 	for (let fractalType = 0; fractalType < 4; fractalType++)

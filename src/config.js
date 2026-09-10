@@ -1,9 +1,9 @@
+import { FORMULAS } from './domain/formulas.js';
+export { MIN_EXPONENT, MAX_EXPONENT } from './domain/formulas.js';
 export const MIN_ZOOM = 1;
 export const STANDARD_RENDER_SAFE_MAX_ZOOM = 1e12;
 export const MAX_ZOOM_DECIMAL_EXPONENT = 400;
 export const DEEP_ZOOM_THRESHOLD = 16;
-export const MIN_EXPONENT = 2;
-export const MAX_EXPONENT = 16;
 export const MAX_CONSTANT_COMPONENT = 2.5;
 export const MIN_RESOLUTION_MULTIPLIER = 0.0625;
 export const MAX_RESOLUTION_MULTIPLIER = 2;
@@ -45,7 +45,7 @@ export const DEEP_INTERACTION_MOTION_SETTLE_MS = 200;
 // outside these bounds (~3x in either direction).
 export const DEEP_PREVIEW_REFRESH_MIN_SCALE = 0.35;
 export const DEEP_PREVIEW_REFRESH_MAX_SCALE = 1 / DEEP_PREVIEW_REFRESH_MIN_SCALE;
-export const SHOW_ZOOM_MODE_NOTICES = import.meta.env.DEV;
+export const SHOW_ZOOM_MODE_NOTICES = import.meta.env?.DEV ?? false;
 
 export const ORBIT_TEXTURE_OPTIONS = {
 	internalFormat: 'RGBA32F',
@@ -85,7 +85,7 @@ export const PALETTE_TEXTURE_OPTIONS = {
 	preserveY: false,
 };
 
-export const FRACTAL_TYPES = ['Julia', 'Mandelbrot', 'Burning Ship', 'Mandala'];
+export const FRACTAL_TYPES = FORMULAS.map(formula => formula.name);
 
 export const MIN_ZOOM_EXPONENT = Math.log(MIN_ZOOM) / Math.log(2);
 export const MAX_ZOOM_EXPONENT = MAX_ZOOM_DECIMAL_EXPONENT / Math.log10(2);

@@ -9,14 +9,18 @@
 		"generate-pwa-assets": "pwa-assets-generator",
 		"preview": "vite preview",
 		"test": "node --test test/*.test.js",
-		"format": "prettier --write \"src/**/*.{html,css,js,json}\"",
-		"format:check": "prettier --check \"src/**/*.{html,css,js,json}\"",
-		"lint": "npm run format",
-		"test:gpu": "playwright test"
+		"format": "prettier --write \"src/**/*.{html,css,js,json}\" \"test/**/*.js\" \"tests/**/*.{js,json,html}\" \"*.js\"",
+		"format:check": "prettier --check \"src/**/*.{html,css,js,json}\" \"test/**/*.js\" \"tests/**/*.{js,json,html}\" \"*.js\"",
+		"lint": "eslint src test tests *.js",
+		"test:gpu": "playwright test",
+		"check": "npm run lint && npm run format:check && npm test && npm run build"
 	},
 	"devDependencies": {
+		"@eslint/js": "^10.0.1",
 		"@playwright/test": "^1.63.0",
 		"@vite-pwa/assets-generator": "^1.0.2",
+		"eslint": "^10.10.0",
+		"globals": "^17.12.0",
 		"prettier": "3.8.3",
 		"vite": "^8.0.13",
 		"vite-plugin-pwa": "^1.3.0"

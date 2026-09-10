@@ -93,13 +93,11 @@ export function toggle() {
 		samples = {};
 		lastDumpMs = 0;
 		const usingTimerExt = !!getTimerExt();
-		// eslint-disable-next-line no-console
 		console.log(
 			`[profiler] enabled — GPU timing via ${usingTimerExt ? 'EXT_disjoint_timer_query_webgl2 (no pipeline kill)' : 'gl.finish() fallback (kills pipelining)'}`,
 		);
 	} else {
 		discardPendingQueries();
-		// eslint-disable-next-line no-console
 		console.log('[profiler] disabled');
 	}
 	return isEnabled;
@@ -198,10 +196,7 @@ function dump(intervalMs) {
 			'% wall': Number(((s.total / intervalMs) * 100).toFixed(1)),
 		}))
 		.sort((a, b) => b['total (ms)'] - a['total (ms)']);
-	// eslint-disable-next-line no-console
 	console.groupCollapsed(`[profiler] ${(intervalMs / 1000).toFixed(1)}s window`);
-	// eslint-disable-next-line no-console
 	console.table(rows);
-	// eslint-disable-next-line no-console
 	console.groupEnd();
 }
