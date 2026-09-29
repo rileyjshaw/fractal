@@ -147,3 +147,23 @@ window.workerProbe = async state => {
 		service.cleanup();
 	}
 };
+
+window.repairFixture = async state => {
+	const { ReferenceService } = await import('../../src/deep/referenceService.js');
+	const service = new ReferenceService();
+	try {
+		await service.initialize();
+		const original = await window.renderFixture(state);
+		const result = await service.repairFrame(
+			{ data: new Float32Array(original.pixels), width: state.width, height: state.height },
+			state,
+		);
+		return {
+			pixels: Array.from(result.metric.data),
+			repaired: result.repairedPixels,
+			originalPixels: original.pixels,
+		};
+	} finally {
+		service.cleanup();
+	}
+};

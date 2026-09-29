@@ -1,0 +1,245 @@
+import { test, expect } from '@playwright/test';
+import { GMPUtils } from '../../src/gmpUtils.js';
+import fixture from '../fixtures/circular-seam.json' with { type: 'json' };
+
+test('zoom settles to a current full-resolution frame', async ({ page }) => {
+	const errors = [];
+	page.on('pageerror', error => errors.push(error.message));
+	await page.setViewportSize({ width: 640, height: 400 });
+	await page.goto(
+		`http://127.0.0.1:5173/fractal/#F=1_E=2_P=0_H=0_A=${fixture.centerRealExact}_B=${fixture.centerImagExact}_W=${fixture.radiusExact}_Z=33.25`,
+	);
+	await page.waitForFunction(() => window.fractalDiagnostics?.mode === 'deep');
+	for (const direction of Array(20).fill(1).concat(Array(20).fill(-1))) {
+		const previousFrame = await page.evaluate(() => window.fractalDiagnostics.frame);
+		await page
+			.locator('canvas')
+			.first()
+			.evaluate((canvas, direction) => {
+				for (let i = 0; i < 10; i++) canvas.dispatchEvent(new WheelEvent('wheel', { deltaY: direction }));
+			}, direction);
+		await page.waitForFunction(previous => window.fractalDiagnostics.targetFrame !== previous, previousFrame);
+		await expect
+			.poll(
+				async () =>
+					page.evaluate(() => {
+						const d = window.fractalDiagnostics;
+						return {
+							moving: d.moving,
+							pending: d.pending,
+							current: d.frame === d.targetFrame,
+							mode: d.mode,
+						};
+					}),
+				{ timeout: 15000 },
+			)
+			.toEqual({ moving: false, pending: null, current: true, mode: 'deep' });
+	}
+	expect(errors).toEqual([]);
+});
+
+test('Julia repair presents a complete frame without a long preview', async ({ page }, testInfo) => {
+	await page.setViewportSize({ width: 960, height: 600 });
+	await page.goto(
+		'http://127.0.0.1:5173/fractal/#F=0_E=2_P=0_H=0_A=-0.50267735688078976448664_B=-0.213776001900282709822774_W=1.7347234759783363e-18_Z=59.99999999999873',
+	);
+	await page.waitForFunction(() => window.fractalDiagnostics?.mode === 'deep' && !window.fractalDiagnostics.pending);
+	const previous = await page.evaluate(() => window.fractalDiagnostics.frame);
+	await page
+		.locator('canvas')
+		.first()
+		.evaluate(canvas => {
+			for (let j = 0; j < 10; j++) canvas.dispatchEvent(new WheelEvent('wheel', { deltaY: -1 }));
+		});
+	await page.waitForFunction(previous => window.fractalDiagnostics.targetFrame !== previous, previous);
+	await expect
+		.poll(
+			() =>
+				page.evaluate(() => {
+					const d = window.fractalDiagnostics;
+					return !d.moving && !d.pending && d.frame === d.targetFrame;
+				}),
+			{ timeout: 5000 },
+		)
+		.toBe(true);
+	await expect
+		.poll(() => page.evaluate(() => window.fractalDiagnostics.repairedPixels), { timeout: 5000 })
+		.toBeGreaterThan(0);
+	await testInfo.attach('progress.json', {
+		body: JSON.stringify(await page.evaluate(() => window.fractalDiagnostics)),
+		contentType: 'application/json',
+	});
+	await expect
+		.poll(
+			() =>
+				page.evaluate(() => {
+					const d = window.fractalDiagnostics;
+					return !d.pending && d.frame === d.targetFrame;
+				}),
+			{ timeout: 60000 },
+		)
+		.toBe(true);
+});
+
+test('fast zoom and pan settles to the same view as a reload', async ({ page }, testInfo) => {
+	await page.setViewportSize({ width: 320, height: 200 });
+	const errors = [];
+	page.on('pageerror', e => errors.push(e.message));
+	// Offset the starting center so the intervening clicks land back on the
+	// reported Julia feature at zoom 60, rather than an uninformative flat exterior.
+	const gmp = new GMPUtils();
+	await gmp.init();
+	let center = { centerReal: '-0.50267735688078976448664', centerImag: '-0.213776001900282709822774' };
+	try {
+		for (let i = 0; i < 20; i += 3) {
+			center = gmp.translateCenter(
+				center.centerReal,
+				center.centerImag,
+				String(2 ** (1 - (50 + (i + 1) / 2))),
+				i % 2 ? -0.2 : 0.2,
+				0,
+			);
+		}
+	} finally {
+		gmp.cleanup();
+	}
+	await page.goto(
+		`http://127.0.0.1:5173/fractal/#F=0_E=2_P=0_H=0_C=y54_A=${center.centerReal}_B=${center.centerImag}_W=1.7763568394002505e-15_Z=50`,
+	);
+	await page.waitForFunction(() => window.fractalDiagnostics?.mode === 'deep');
+	await page
+		.locator('canvas')
+		.first()
+		.evaluate(async canvas => {
+			for (let i = 0; i < 20; i++) {
+				for (let j = 0; j < 10; j++) canvas.dispatchEvent(new WheelEvent('wheel', { deltaY: -1 }));
+				if (i % 3 === 0)
+					canvas.dispatchEvent(new MouseEvent('click', { clientX: 160 + (i % 2 ? 20 : -20), clientY: 100 }));
+				await new Promise(requestAnimationFrame);
+			}
+		});
+	try {
+		await expect
+			.poll(
+				() =>
+					page.evaluate(() => {
+						const d = window.fractalDiagnostics;
+						return (
+							!d.moving &&
+							!d.pending &&
+							!d.pendingReference &&
+							d.mode === 'deep' &&
+							d.frame === d.targetFrame
+						);
+					}),
+				{ timeout: 20000 },
+			)
+			.toBe(true);
+	} finally {
+		await testInfo.attach('settled.json', {
+			body: JSON.stringify(await page.evaluate(() => window.fractalDiagnostics)),
+			contentType: 'application/json',
+		});
+	}
+	await page.addStyleTag({ content: '#info { visibility: hidden; }' });
+	const before = await page.screenshot({ path: testInfo.outputPath('after-interaction.png') });
+	await testInfo.attach('after-interaction.png', { body: before, contentType: 'image/png' });
+	await page.reload();
+	await page.waitForFunction(() => window.fractalDiagnostics?.mode === 'deep' && !window.fractalDiagnostics.pending);
+	await page.addStyleTag({ content: '#info { visibility: hidden; }' });
+	const after = await page.screenshot({ path: testInfo.outputPath('after-reload.png') });
+	await testInfo.attach('after-reload.png', { body: after, contentType: 'image/png' });
+	const difference = await page.evaluate(
+		async ({ before, after }) => {
+			async function decode(bytes) {
+				const bitmap = await createImageBitmap(new Blob([new Uint8Array(bytes)], { type: 'image/png' }));
+				const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+				const context = canvas.getContext('2d');
+				context.drawImage(bitmap, 0, 0);
+				const data = context.getImageData(0, 0, bitmap.width, bitmap.height).data;
+				bitmap.close();
+				return data;
+			}
+			const a = await decode(before),
+				b = await decode(after);
+			let total = 0;
+			for (let i = 0; i < a.length; i++) if (i % 4 !== 3) total += Math.abs(a[i] - b[i]);
+			return total / (a.length * 0.75);
+		},
+		{ before: Array.from(before), after: Array.from(after) },
+	);
+	await testInfo.attach('image-difference.json', {
+		body: JSON.stringify({ meanChannelDifference: difference }),
+		contentType: 'application/json',
+	});
+	expect(difference).toBeLessThan(3);
+	expect(errors).toEqual([]);
+});
+
+test('deeper Julia gap fixture repairs against direct MPFR pixels', async ({ page }, testInfo) => {
+	await page.goto('http://127.0.0.1:5173/fractal/@fs' + process.cwd() + '/tests/browser/harness.html');
+	await page.waitForFunction(() => window.ready);
+	const state = {
+		...fixture,
+		fractalType: 0,
+		centerRealExact: '-0.5026773568807897644818506313983',
+		centerImagExact: '-0.2137760019002827098156989404876',
+		radiusExact: '1.2296113373026906e-25',
+		zoom: 83.75,
+		width: 48,
+		height: 30,
+	};
+	const result = await page.evaluate(
+		async state => ({
+			actual: await window.repairFixture(state),
+			expected: await window.renderFixture(state, { forceRepair: true }),
+		}),
+		state,
+	);
+	let maximumRepairError = 0;
+	for (let i = 0; i < result.actual.pixels.length; i += 4) {
+		expect(result.actual.pixels[i + 3]).toBe(result.expected.pixels[i + 3]);
+		if (result.actual.originalPixels[i + 3] < 0)
+			maximumRepairError = Math.max(
+				maximumRepairError,
+				Math.abs(result.actual.pixels[i] - result.expected.pixels[i]),
+			);
+	}
+	expect(result.actual.repaired).toBeGreaterThan(0);
+	expect(maximumRepairError).toBeLessThan(0.001);
+	await testInfo.attach('gap-repair.json', {
+		body: JSON.stringify({ maximumRepairError, repaired: result.actual.repaired }),
+		contentType: 'application/json',
+	});
+});
+
+test('application presents the deeper gap view only after repair completes', async ({ page }, testInfo) => {
+	await page.setViewportSize({ width: 640, height: 400 });
+	const errors = [];
+	page.on('pageerror', e => errors.push(e.message));
+	await page.addInitScript(() => {
+		window.partialFramePublished = false;
+		const observe = () => {
+			const d = window.fractalDiagnostics;
+			if (d?.mode === 'deep' && d.pending && d.frame === null) window.partialFramePublished = true;
+			requestAnimationFrame(observe);
+		};
+		requestAnimationFrame(observe);
+	});
+	await page.goto(
+		'http://127.0.0.1:5173/fractal/#C=y54_F=0_E=2_P=0_H=0_A=-0.5026773568807897644818506313983_B=-0.2137760019002827098156989404876_W=1.2296113373026906e-25_Z=83.74999999999739',
+	);
+	await page.waitForFunction(
+		() => {
+			const d = window.fractalDiagnostics;
+			return d?.mode === 'deep' && !d.pending && d.frame === d.targetFrame;
+		},
+		undefined,
+		{ timeout: 30000 },
+	);
+	expect(await page.evaluate(() => window.fractalDiagnostics.invalidPixels)).toBe(0);
+	await page.addStyleTag({ content: '#info {visibility:hidden}' });
+	await page.screenshot({ path: testInfo.outputPath('gap-view-complete.png') });
+	expect(await page.evaluate(() => window.partialFramePublished)).toBe(false);
+	expect(errors).toEqual([]);
+});

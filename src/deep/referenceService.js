@@ -1,5 +1,6 @@
 import { DeepZoomManager } from '../deepZoom.js';
 import { LatestWorker } from './workerClient.js';
+import { RepairPool } from './repairPool.js';
 const createWorker = () => new Worker(new URL('./reference.worker.js', import.meta.url), { type: 'module' });
 // The inherited GMP instance handles small navigation operations only. Reference
 // search, orbits, tables, and pixel repair are isolated in replaceable workers.
@@ -7,7 +8,7 @@ export class ReferenceService extends DeepZoomManager {
 	constructor(options = {}) {
 		super(options);
 		this.jobs = new LatestWorker(options.createWorker ?? createWorker);
-		this.repairs = new LatestWorker(options.createWorker ?? createWorker);
+		this.repairs = new RepairPool(options.createWorker ?? createWorker);
 	}
 	ensureReference(state) {
 		const signature = this.getReferenceSignature(state);
@@ -39,8 +40,8 @@ export class ReferenceService extends DeepZoomManager {
 			});
 		return this.pendingReferencePromise;
 	}
-	repairFrame(metric, state) {
-		return this.repairs.request('repair', { metric, state }, [metric.data.buffer]);
+	repairFrame(metric, state, onProgress) {
+		return this.repairs.repair(metric, state, onProgress);
 	}
 	invalidate() {
 		super.invalidate();

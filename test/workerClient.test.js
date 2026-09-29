@@ -43,3 +43,24 @@ test('worker errors reject the job and the next request can recover', async () =
 	assert.equal(await retry, 'recovered');
 	client.cancel();
 });
+
+test('progress keeps the job pending and cancelled jobs cannot publish patches', async () => {
+	const workers = [];
+	const client = new LatestWorker(() => {
+		const worker = new FakeWorker();
+		workers.push(worker);
+		return worker;
+	});
+	const updates = [];
+	const old = client.request('repair', {}, [], progress => updates.push(progress)).catch(error => error.name);
+	workers[0].onmessage({ data: { id: workers[0].message.id, progress: 'first' } });
+	assert.ok(client.pending);
+	const current = client.request('repair', {}, [], progress => updates.push(progress));
+	workers[0].onmessage({ data: { id: workers[0].message.id, progress: 'stale' } });
+	workers[1].onmessage({ data: { id: workers[1].message.id, progress: 'current' } });
+	workers[1].finish('done');
+	assert.deepEqual(updates, ['first', 'current']);
+	assert.equal(await old, 'AbortError');
+	assert.equal(await current, 'done');
+	client.cancel();
+});

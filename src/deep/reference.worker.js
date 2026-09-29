@@ -19,11 +19,24 @@ self.onmessage = async ({ data: { id, type, payload } }) => {
 				.filter(Boolean)
 				.map(array => array.buffer);
 			result.textureBytes = transfer.reduce((total, buffer) => total + buffer.byteLength, 0);
-		} else if (type === 'repair') {
-			const { metric, state } = payload;
-			const repairedPixels = repairMetrics(manager.gmp, metric.data, state, metric.width, metric.height);
-			result = { metric, repairedPixels };
-			transfer = [metric.data.buffer];
+		} else if (type === 'repairBatch') {
+			const { pixels, pixelIndices, width, height, state } = payload;
+			let lastUpdate = performance.now();
+			const repairedPixels = repairMetrics(
+				manager.gmp,
+				pixels,
+				state,
+				width,
+				height,
+				(_index, repairedPixels) => {
+					if (performance.now() - lastUpdate < 100) return;
+					self.postMessage({ id, progress: { repairedPixels } });
+					lastUpdate = performance.now();
+				},
+				{ adaptive: true, pixelIndices },
+			);
+			result = { pixels, pixelIndices, repairedPixels };
+			transfer = [pixels.buffer, pixelIndices.buffer];
 		} else throw Error(`Unknown worker job ${type}`);
 		result.workerDurationMs = performance.now() - started;
 		self.postMessage({ id, result }, transfer);

@@ -7,7 +7,7 @@ export class LatestWorker {
 		this.worker = null;
 		this.pending = null;
 	}
-	request(type, payload, transfer = []) {
+	request(type, payload, transfer = [], onProgress) {
 		if (this.pending) this.cancel();
 		if (!this.worker) this.worker = this.createWorker();
 		const worker = this.worker,
@@ -16,6 +16,10 @@ export class LatestWorker {
 			this.pending = { id, resolve, reject };
 			worker.onmessage = ({ data }) => {
 				if (this.worker !== worker || this.pending?.id !== data.id) return;
+				if (data.progress) {
+					onProgress?.(data.progress);
+					return;
+				}
 				this.pending = null;
 				if (data.error) reject(new Error(data.error));
 				else resolve(data.result);

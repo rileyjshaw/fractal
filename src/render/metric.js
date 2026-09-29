@@ -1,4 +1,4 @@
-import { logDecimal } from '../math/precision.js';
+import { logDecimal, precisionForView } from '../math/precision.js';
 import { STRIPE_EWMA_ALPHA } from '../shaderCommon.js';
 export const METRIC_SCHEMA = 1;
 export const INVALID_METRIC = [-1, 0, 0, -1];
@@ -72,11 +72,11 @@ export function metricFromOrbit(orbit, state) {
 	return [0, 0, pack(brightness), 0];
 }
 
-export function repairMetrics(gmp, pixels, state, width, height) {
+export function repairMetrics(gmp, pixels, state, width, height, onRepair, { adaptive = false, pixelIndices } = {}) {
 	let repaired = 0;
 	for (let index = 0; index < pixels.length; index += 4) {
 		if (pixels[index + 3] >= 0 && pixels.subarray(index, index + 4).every(Number.isFinite)) continue;
-		const pixel = index / 4,
+		const pixel = pixelIndices ? pixelIndices[index / 4] : index / 4,
 			x = pixel % width,
 			y = Math.floor(pixel / width),
 			span = Math.min(width, height);
@@ -87,14 +87,34 @@ export function repairMetrics(gmp, pixels, state, width, height) {
 			(2 * x + 1 - width) / span,
 			(2 * y + 1 - height) / span,
 		);
-		const { orbit } = gmp.computeReferenceData(
-			center.centerReal,
-			center.centerImag,
-			state.deepIterations + 34,
-			state,
-		);
-		pixels.set(metricFromOrbit(orbit, state), index);
+		const calculate = precisionBits => {
+			const { orbit } = gmp.computeReferenceData(
+				center.centerReal,
+				center.centerImag,
+				state.deepIterations + 34,
+				{ ...state, precisionBits },
+			);
+			return new Float32Array(metricFromOrbit(orbit, state));
+		};
+		let value;
+		if (adaptive) {
+			const maximum = gmp.precision;
+			let precision = Math.min(
+				maximum,
+				precisionForView(center.centerReal, center.centerImag, state.radiusExact, width, height) + 64,
+			);
+			value = calculate(precision);
+			while (precision < maximum) {
+				precision = Math.min(maximum, precision * 2);
+				const refined = calculate(precision);
+				const stable = refined.every((component, i) => component === value[i]);
+				value = refined;
+				if (stable) break;
+			}
+		} else value = calculate(undefined);
+		pixels.set(value, index);
 		repaired++;
+		onRepair?.(index, repaired);
 	}
 	return repaired;
 }

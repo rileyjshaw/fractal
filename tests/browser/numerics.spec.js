@@ -107,7 +107,7 @@ test('application presents a completed deep frame without WebGL errors', async (
 			fixture.radiusExact +
 			'_Z=33.25',
 	);
-	await page.waitForFunction(() => window.fractalDiagnostics?.mode === 'deep');
+	await page.waitForFunction(() => window.fractalDiagnostics?.mode === 'deep' && !window.fractalDiagnostics.pending);
 	await page.screenshot({ path: 'output/playwright/circular-seam-fixed.png' });
 	expect(errors).toEqual([]);
 });
@@ -164,7 +164,7 @@ test('application handles formula switches, toggles and resize', async ({ page }
 	const errors = [];
 	page.on('pageerror', e => errors.push(e.message));
 	await page.goto('http://127.0.0.1:5173/fractal/#F=1_E=2_P=0_H=0_A=1.4_B=.1_W=1e-8_Z=27.5754247590989');
-	await page.waitForFunction(() => window.fractalDiagnostics?.mode === 'deep');
+	await page.waitForFunction(() => window.fractalDiagnostics?.mode === 'deep' && !window.fractalDiagnostics.pending);
 	for (const key of ['f', 'e', 'n', 'a']) await page.keyboard.press(key);
 	await page.setViewportSize({ width: 400, height: 640 });
 	await page.waitForFunction(

@@ -124,3 +124,18 @@ test('first-step high-power escapes retain the endpoint for classification', () 
 	const [x, y] = orbitEntry(orbit, 1);
 	assert.ok(x * x + y * y > 64 * 64);
 });
+
+test('short orbits do not allocate the entire iteration budget', async () => {
+	const gmp = new GMPUtils();
+	await gmp.init();
+	try {
+		const result = gmp.computeReferenceData('1.4', '.1', 65536, { fractalType: 1, exponent: 2 });
+		assert.ok(result.orbitLength < 256);
+		assert.ok(result.orbit.buffer.byteLength <= 256 * 3 * 4);
+		const long = gmp.computeReferenceData('0', '0', 1024, { fractalType: 1, exponent: 2 });
+		assert.equal(long.orbitLength, 1024);
+		assert.ok(long.orbit.every(value => value === 0));
+	} finally {
+		gmp.cleanup();
+	}
+});

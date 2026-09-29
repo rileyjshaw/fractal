@@ -230,14 +230,25 @@ export class GMPUtils {
 		centerReal,
 		centerImag,
 		iterations,
-		{ fractalType = 1, cReal = 0, cImaginary = 0, exponent = 2, radiusExact = '1e-20' } = {},
+		{ fractalType = 1, cReal = 0, cImaginary = 0, exponent = 2, radiusExact = '1e-20', precisionBits } = {},
 	) {
 		if (!this.binding) {
 			throw new Error('GMP-WASM not initialized');
 		}
 
 		this.ensureViewPrecision(centerReal, centerImag, radiusExact);
-		const orbit = new Float32Array(Math.min(iterations + 1, ORBIT_CAPACITY) * 3);
+		const precision =
+			precisionBits === undefined
+				? this.precision
+				: Math.max(precisionBits, precisionForView(centerReal, centerImag, radiusExact));
+		const capacity = Math.min(iterations + 1, ORBIT_CAPACITY);
+		let orbit = new Float32Array(Math.min(capacity, 256) * 3);
+		const reserveOrbit = entries => {
+			if (entries * 3 <= orbit.length) return;
+			const expanded = new Float32Array(Math.min(capacity, Math.max(entries, (orbit.length / 3) * 2)) * 3);
+			expanded.set(orbit);
+			orbit = expanded;
+		};
 		let x = null;
 		let y = null;
 		let cx = null;
@@ -254,25 +265,26 @@ export class GMPUtils {
 		try {
 			const isFolded = fractalType === FRACTAL_TYPE_BURNING_SHIP || fractalType === FRACTAL_TYPE_MANDALA;
 			const seedsFromCenter = fractalType === FRACTAL_TYPE_JULIA || fractalType === FRACTAL_TYPE_MANDALA;
-			x = this.createMPFR(seedsFromCenter ? centerReal : 0);
-			y = this.createMPFR(seedsFromCenter ? centerImag : 0);
-			cx = this.createMPFR(seedsFromCenter ? cReal : centerReal);
-			cy = this.createMPFR(seedsFromCenter ? cImaginary : centerImag);
+			x = this.createMPFR(seedsFromCenter ? centerReal : 0, precision);
+			y = this.createMPFR(seedsFromCenter ? centerImag : 0, precision);
+			cx = this.createMPFR(seedsFromCenter ? cReal : centerReal, precision);
+			cy = this.createMPFR(seedsFromCenter ? cImaginary : centerImag, precision);
 			if (fractalType === FRACTAL_TYPE_BURNING_SHIP) {
 				this.binding.mpfr_neg(cy, cy, 0);
 			}
-			x2 = this.createMPFR();
-			y2 = this.createMPFR();
-			xy = this.createMPFR();
-			temp = this.createMPFR();
-			powerReal = this.createMPFR();
-			powerImag = this.createMPFR();
-			escapeMagnitude = this.createMPFR();
+			x2 = this.createMPFR(0, precision);
+			y2 = this.createMPFR(0, precision);
+			xy = this.createMPFR(0, precision);
+			temp = this.createMPFR(0, precision);
+			powerReal = this.createMPFR(0, precision);
+			powerImag = this.createMPFR(0, precision);
+			escapeMagnitude = this.createMPFR(0, precision);
 			exponentPointer = this.binding.malloc(8);
 
 			let actualIterations = 0;
 
 			for (let i = 0; i < iterations && i < ORBIT_CAPACITY; i++) {
+				reserveOrbit(i + 1);
 				const xExponent = this.binding.mpfr_get_exp(x);
 				const yExponent = this.binding.mpfr_get_exp(y);
 				const scaleExponent = Math.max(xExponent, yExponent);
@@ -335,7 +347,8 @@ export class GMPUtils {
 				if (this.binding.mpfr_get_d(escapeMagnitude, 0) > REFERENCE_ESCAPE_MAGNITUDE_SQ) {
 					// Include the escaped endpoint, including a first-step escape
 					// at high powers. Otherwise the pixel oracle could see only z0.
-					if (actualIterations < orbit.length / 3) {
+					if (actualIterations < capacity) {
+						reserveOrbit(actualIterations + 1);
 						const xe = this.binding.mpfr_get_exp(x),
 							ye = this.binding.mpfr_get_exp(y),
 							e = Math.max(xe, ye);
