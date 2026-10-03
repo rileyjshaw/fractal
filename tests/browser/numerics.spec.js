@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { sampleMandelbrot } from '../helpers/oracle.js';
+import { REFERENCE_ORBIT_RUNOFF } from '../../src/shaderCommon.js';
 import fixture from '../fixtures/circular-seam.json' with { type: 'json' };
 
 test.beforeEach(async ({ page }) => {
@@ -158,6 +159,76 @@ test('representative formulas agree with shallow rendering and direct repair', a
 			}
 		}
 	}
+});
+
+test('Julia references cover the budget plus runoff, so interior pixels are not exhausted', async ({
+	page,
+}, testInfo) => {
+	// Main-cardioid Julia set 0.3 radii from its repelling fixed point: 491 of the 1440
+	// pixels run the whole budget, and none approach the cancellation threshold.
+	const state = {
+		...fixture,
+		fractalType: 0,
+		cReal: 0.3274,
+		cImaginary: 0.1945,
+		centerRealExact: '0.756841083335816496081222888971992696265084456634426675629390',
+		centerImagExact: '-0.378638801615888091663215945619707089671137172244739686172978',
+		radiusExact: '1e-40',
+		width: 48,
+		height: 30,
+		iterations: 1024,
+		deepIterations: 1024,
+	};
+	const result = await page.evaluate(
+		async ({ state, runoff }) => {
+			const referenceIterations = state.deepIterations + runoff;
+			return {
+				exhausted: await window.renderFixture(state),
+				covered: await window.renderFixture(state, { referenceIterations }),
+				// Iterated directly, the fixed point's orbit leaves the cycle after about 700
+				// steps; every escaping pixel here escapes long before that.
+				iterated: await window.renderFixture(state, { referenceIterations: 700, iterateCycle: true }),
+				direct: await window.renderFixture(state, { referenceIterations, forceRepair: true }),
+			};
+		},
+		{ state, runoff: REFERENCE_ORBIT_RUNOFF },
+	);
+	const invalid = pixels => pixels.filter((value, i) => i % 4 === 3 && value < 0).length;
+	const { covered, iterated, direct } = Object.fromEntries(
+		Object.entries(result).map(([name, image]) => [name, image.pixels]),
+	);
+	let interior = 0,
+		escaped = 0,
+		maxSmoothError = 0;
+	for (let i = 0; i < covered.length; i += 4) {
+		expect(covered[i + 3]).toBe(direct[i + 3]);
+		if (direct[i] === 0) {
+			interior++;
+			continue;
+		}
+		escaped++;
+		maxSmoothError = Math.max(maxSmoothError, Math.abs(covered[i] - direct[i]));
+		// Repeating the cycle must reproduce the directly iterated orbit exactly while that
+		// orbit is still on the cycle, so it is never less accurate than direct iteration.
+		expect(iterated[i + 3]).toBeGreaterThanOrEqual(0);
+		expect(covered.slice(i, i + 4)).toEqual(iterated.slice(i, i + 4));
+	}
+	// Float32 reference samples leave one sensitive pixel about 0.12 off the MPFR smooth
+	// escape count with either reference; recorded here, bounded relatively above.
+	await testInfo.attach('julia-runoff.json', {
+		body: JSON.stringify({
+			exhaustedInvalid: invalid(result.exhausted.pixels),
+			interior,
+			escaped,
+			maxSmoothError,
+			reference: result.covered.reference,
+		}),
+		contentType: 'application/json',
+	});
+	expect(invalid(result.exhausted.pixels)).toBeGreaterThan(0);
+	expect(invalid(covered)).toBe(0);
+	expect(interior).toBeGreaterThan(0);
+	expect(escaped).toBeGreaterThan(0);
 });
 
 test('application handles formula switches, toggles and resize', async ({ page }) => {

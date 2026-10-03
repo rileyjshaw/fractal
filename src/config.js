@@ -41,10 +41,12 @@ export const DEEP_REFERENCE_ITERATION_HEADROOM_EXPONENT = 12;
 // units of u_iterations growth per recompute.
 export const DEEP_REFERENCE_ITERATION_QUANTUM = 4096;
 export const DEEP_INTERACTION_MOTION_SETTLE_MS = 200;
-// Reproject the held metric frame during interaction; refresh once magnification drifts
-// outside these bounds (~3x in either direction).
+// Reproject the held metric frame during interaction; refresh once it is magnified by
+// more than ~3x. Zooming out or panning uncovers the view, which already forces a refresh.
 export const DEEP_PREVIEW_REFRESH_MIN_SCALE = 0.35;
-export const DEEP_PREVIEW_REFRESH_MAX_SCALE = 1 / DEEP_PREVIEW_REFRESH_MIN_SCALE;
+// Past this zoom the standard renderer's float32 view coordinates no longer resolve
+// the view, so a deep view without a usable frame shows an inside-colour placeholder.
+export const STANDARD_FALLBACK_MAX_ZOOM_EXPONENT = 24;
 export const SHOW_ZOOM_MODE_NOTICES = import.meta.env?.DEV ?? false;
 
 export const ORBIT_TEXTURE_OPTIONS = {

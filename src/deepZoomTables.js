@@ -1,4 +1,4 @@
-import { STRIPE_EWMA_ALPHA } from './shaderCommon.js';
+import { REFERENCE_ORBIT_RUNOFF, STRIPE_EWMA_ALPHA } from './shaderCommon.js';
 
 export const ORBIT_TEXTURE_SIZE = 1024;
 export const ORBIT_TEXTURE_CHANNELS = 4;
@@ -165,9 +165,15 @@ export function writeBLAEntry(data, level, index, entry) {
 export function buildHierarchicalBLATable(orbit, { maxLevels = BLA_MAX_LEVELS, compact = false } = {}) {
 	const orbitLength = Math.floor(orbit.length / 3);
 	const levels = Math.max(1, Math.min(BLA_MAX_LEVELS, maxLevels));
+	// The runoff tail past the budget is only followed after escape, never skipped, so
+	// it does not double the compact stride of a power-of-two budget.
+	const skippableLength = Math.max(1, orbitLength - REFERENCE_ORBIT_RUNOFF);
 	const stride = compact
-		? Math.min(BLA_LEVEL_STRIDE, Math.max(512, 2 ** Math.ceil(Math.log2(Math.max(1, orbitLength)))))
+		? Math.min(BLA_LEVEL_STRIDE, Math.max(512, 2 ** Math.ceil(Math.log2(skippableLength))))
 		: BLA_LEVEL_STRIDE;
+	// Entries are composed from the level below at index + chunk/2. Past the stride
+	// that read would alias into the next level, so no chunk may end beyond it.
+	const tableLength = Math.min(orbitLength, stride);
 	const data = new Float32Array(stride * BLA_MAX_LEVELS * BLA_FLOATS_PER_ENTRY);
 	data.stride = stride;
 
@@ -178,10 +184,8 @@ export function buildHierarchicalBLATable(orbit, { maxLevels = BLA_MAX_LEVELS, c
 	for (let level = 0; level < levels; level++) {
 		const chunkSize = BLA_BASE_CHUNK_SIZE << level;
 		const previousChunkSize = chunkSize >> 1;
-		const maxIndex = Math.min(stride, orbitLength);
-
-		for (let index = 0; index < maxIndex; index++) {
-			if (index + chunkSize > orbitLength) break;
+		for (let index = 0; index < tableLength; index++) {
+			if (index + chunkSize > tableLength) break;
 			const entry =
 				level === 0
 					? buildDirectBLAEntry(orbit, index, chunkSize)

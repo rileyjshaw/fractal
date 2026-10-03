@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
 	BLA_BASE_CHUNK_SIZE,
 	BLA_INVALID_RSQ_LOG2,
+	BLA_LEVEL_STRIDE,
 	buildDirectBLAEntry,
 	buildHierarchicalBLATable,
 	buildVisualPrefixTextureData,
@@ -12,7 +13,7 @@ import {
 	readBLAEntry,
 	stripeAverageAddend,
 } from '../src/deepZoomTables.js';
-import { STRIPE_EWMA_ALPHA } from '../src/shaderCommon.js';
+import { REFERENCE_ORBIT_RUNOFF, STRIPE_EWMA_ALPHA } from '../src/shaderCommon.js';
 
 function buildOrbit(length) {
 	const orbit = new Float32Array(length * 3);
@@ -166,4 +167,34 @@ test('compact BLA layouts preserve coefficients and interval minima', () => {
 		for (const index of [1, 8, 16]) {
 			assert.deepEqual(readBLAEntry(compact, level, index), readBLAEntry(full, level, index));
 		}
+});
+
+test('reference runoff does not double the compact stride of a power-of-two budget', () => {
+	assert.equal(buildHierarchicalBLATable(buildOrbit(4096 + REFERENCE_ORBIT_RUNOFF), { compact: true }).stride, 4096);
+	assert.equal(buildHierarchicalBLATable(buildOrbit(4097 + REFERENCE_ORBIT_RUNOFF), { compact: true }).stride, 8192);
+});
+
+test('entries never compose across the level stride', () => {
+	// A capped reference is longer than the maximum stride: composing index + chunk/2
+	// past it would read the next level's entries. Every entry must match its two
+	// children at the level below. Only the table layout matters, not a real orbit.
+	const length = BLA_LEVEL_STRIDE + REFERENCE_ORBIT_RUNOFF;
+	const table = buildHierarchicalBLATable(new Float32Array(length * 3).fill(0.25), { compact: true });
+	assert.equal(table.stride, BLA_LEVEL_STRIDE);
+	for (let level = 1; level < 4; level++) {
+		const chunk = BLA_BASE_CHUNK_SIZE << level;
+		for (let index = BLA_LEVEL_STRIDE - chunk - 4; index < BLA_LEVEL_STRIDE; index++) {
+			const entry = readBLAEntry(table, level, index);
+			if (index + chunk > BLA_LEVEL_STRIDE) {
+				assert.ok(entry.validityRsqLog2 <= BLA_INVALID_RSQ_LOG2 * 0.5, `level ${level} index ${index}`);
+				continue;
+			}
+			const expected = composeBLAEntries(
+				readBLAEntry(table, level - 1, index),
+				readBLAEntry(table, level - 1, index + chunk / 2),
+			);
+			assertComplexClose(entry.a, expected.a);
+			assertComplexClose(entry.b, expected.b);
+		}
+	}
 });

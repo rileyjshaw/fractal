@@ -8,6 +8,7 @@ import {
 	DEEP_REFERENCE_ITERATION_HEADROOM_EXPONENT,
 	DEEP_REFERENCE_ITERATION_QUANTUM,
 } from '../config.js';
+import { REFERENCE_ORBIT_RUNOFF } from '../shaderCommon.js';
 export function getStandardIterationBudget(zoom) {
 	// Ramp iteration budget toward the deep floor across the preparation margin.
 	const rampStartZoom = DEEP_ZOOM_THRESHOLD - DEEP_ZOOM_PREPARATION_MARGIN_EXPONENT;
@@ -38,8 +39,10 @@ export function getReferenceIterationCount(zoom, currentDeepIterations) {
 	// visible jump (findGoodReferenceCenter may shift the center, u_referenceOffset
 	// changes, every pixel sees a different reference). The quantum here amortizes
 	// each (expensive) GMP compute across many zoom units of zooming.
+	// Runoff rides on top of the quantized budget so it survives the iteration cap,
+	// where headroom no longer adds anything.
 	const headroomZoom = Math.max(zoom, DEEP_ZOOM_THRESHOLD) + DEEP_REFERENCE_ITERATION_HEADROOM_EXPONENT;
 	const target = getDeepIterationBudget(headroomZoom);
 	const quantized = Math.ceil(target / DEEP_REFERENCE_ITERATION_QUANTUM) * DEEP_REFERENCE_ITERATION_QUANTUM;
-	return Math.max(currentDeepIterations, quantized);
+	return Math.max(currentDeepIterations, quantized) + REFERENCE_ORBIT_RUNOFF;
 }

@@ -45,6 +45,23 @@ test('sparse repair batches preserve global pixel coordinates and finish atomica
 		assert.deepEqual(Array.from(result.metric.data.slice(i * 4, i * 4 + 4)), [i, 0, 0, 1]);
 	pool.cancel();
 });
+test('non-finite metrics with positive coverage are sent for repair', async () => {
+	const workers = [];
+	const pool = new RepairPool(() => {
+		const w = new Worker();
+		workers.push(w);
+		return w;
+	}, 1);
+	const data = new Float32Array(6 * 4).fill(1);
+	data[1 * 4] = NaN;
+	data[3 * 4 + 2] = Infinity;
+	data[5 * 4 + 3] = -1;
+	const done = pool.repair({ data, width: 3, height: 2 }, {});
+	assert.deepEqual(Array.from(workers[0].message.payload.pixelIndices), [1, 3, 5]);
+	workers[0].finish();
+	assert.equal((await done).repairedPixels, 3);
+	pool.cancel();
+});
 test('superseding a repair cancels every old batch and ignores late results', async () => {
 	const workers = [];
 	const pool = new RepairPool(() => {

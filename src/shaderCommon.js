@@ -23,6 +23,17 @@ export const N_COLORS = 32;
 // running value across BLA chunk skips) uses the same recurrence.
 export const STRIPE_EWMA_ALPHA = 0.1;
 
+// Cap on the post-escape stripe runoff. From the default escape radius the orbit
+// reaches the stripe radius in 2-4 squarings; the cap only binds for sub-1 escape
+// radii, where orbits can linger — a partial average still stripes acceptably there.
+export const STRIPE_RUNOFF_LIMIT = 32;
+
+// Reference samples needed past the iteration budget. The perturbation loop reads one
+// sample ahead of the step it takes, and escaped pixels keep following the reference
+// for the stripe runoff. Center-seeded formulas cannot rebase, so a shorter reference
+// marks every pixel that reaches the budget invalid.
+export const REFERENCE_ORBIT_RUNOFF = STRIPE_RUNOFF_LIMIT + 2;
+
 // Metric-packing constants + TAU. Shared by all three shaders (the two iteration passes
 // pack, the display pass unpacks), so they must agree everywhere.
 export const GLSL_PACK_CONSTANTS = `
@@ -58,10 +69,7 @@ const float STRIPE_AVERAGE_DENSITY = 8.0;
 const float STRIPE_AVERAGE_COLOR_SCALE = float(N_COLORS);
 const float STRIPE_AVERAGE_ESCAPE_RADIUS = 64.0;
 const float STRIPE_EWMA_ALPHA = ${STRIPE_EWMA_ALPHA};
-// Cap on the post-escape stripe runoff. From the default escape radius the orbit
-// reaches the stripe radius in 2-4 squarings; the cap only binds for sub-1 escape
-// radii, where orbits can linger — a partial average still stripes acceptably there.
-const int STRIPE_RUNOFF_LIMIT = 32;
+const int STRIPE_RUNOFF_LIMIT = ${STRIPE_RUNOFF_LIMIT};
 const float NO_NORMAL_ANGLE = -1.0;
 
 vec2 cmul(vec2 a, vec2 b) {

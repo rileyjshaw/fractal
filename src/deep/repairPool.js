@@ -1,4 +1,5 @@
 import { LatestWorker } from './workerClient.js';
+import { isInvalidMetric } from '../render/metric.js';
 
 // Sparse batches avoid copying a full-resolution image into every worker.
 // Publication stays atomic: callers receive the frame only after all batches finish.
@@ -14,7 +15,7 @@ export class RepairPool {
 		this.pending = true;
 		const indices = [];
 		for (let i = 0; i < metric.data.length; i += 4) {
-			if (metric.data[i + 3] < 0 || !metric.data.subarray(i, i + 4).every(Number.isFinite)) indices.push(i / 4);
+			if (isInvalidMetric(metric.data, i)) indices.push(i / 4);
 		}
 		const count = Math.min(this.lanes.length, Math.ceil(indices.length / 256));
 		const completed = Array(count).fill(0);

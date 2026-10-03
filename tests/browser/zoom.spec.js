@@ -81,6 +81,107 @@ test('Julia repair presents a complete frame without a long preview', async ({ p
 		.toBe(true);
 });
 
+test('a continuous wheel burst completes its jobs and presents frames before input stops', async ({
+	page,
+}, testInfo) => {
+	await page.setViewportSize({ width: 320, height: 200 });
+	const errors = [];
+	page.on('pageerror', error => errors.push(error.message));
+	await page.goto(
+		'http://127.0.0.1:5173/fractal/#F=0_E=2_P=0_H=0_A=-0.50267735688078976448664_B=-0.213776001900282709822774_W=1.7347234759783363e-18_Z=59.99999999999873',
+	);
+	await page.waitForFunction(
+		() => {
+			const d = window.fractalDiagnostics;
+			return d?.mode === 'deep' && !d.pending && d.frame === d.targetFrame;
+		},
+		undefined,
+		{ timeout: 60000 },
+	);
+	// Wheel events every 50 ms keep the view moving (it settles after 200 ms) for six
+	// zoom units, far enough to outgrow the initial reference and preview.
+	const burst = await page
+		.locator('canvas')
+		.first()
+		.evaluate(async canvas => {
+			const before = structuredClone(window.fractalDiagnostics.jobs);
+			const initial = window.fractalDiagnostics.frame;
+			const frames = new Set();
+			let stoppedMoving = false;
+			for (let i = 0; i < 120; i++) {
+				canvas.dispatchEvent(new WheelEvent('wheel', { deltaY: -1 }));
+				await new Promise(resolve => setTimeout(resolve, 50));
+				const d = window.fractalDiagnostics;
+				if (!d.moving) stoppedMoving = true;
+				if (d.frame !== initial) frames.add(d.frame);
+			}
+			return {
+				before,
+				after: structuredClone(window.fractalDiagnostics.jobs),
+				frames: frames.size,
+				stoppedMoving,
+			};
+		});
+	await testInfo.attach('wheel-burst.json', { body: JSON.stringify(burst), contentType: 'application/json' });
+	expect(burst.stoppedMoving).toBe(false);
+	for (const kind of ['reference', 'repair']) {
+		expect(burst.after[kind].cancelled - burst.before[kind].cancelled).toBe(0);
+		expect(burst.after[kind].failed - burst.before[kind].failed).toBe(0);
+	}
+	expect(burst.after.reference.completed + burst.after.repair.completed).toBeGreaterThan(
+		burst.before.reference.completed + burst.before.repair.completed,
+	);
+	expect(burst.frames).toBeGreaterThan(0);
+	await expect
+		.poll(
+			() =>
+				page.evaluate(() => {
+					const d = window.fractalDiagnostics;
+					return !d.moving && !d.pending && d.mode === 'deep' && d.frame === d.targetFrame;
+				}),
+			{ timeout: 60000 },
+		)
+		.toBe(true);
+	expect(errors).toEqual([]);
+});
+
+test('reset drops the held deep frame', async ({ page }) => {
+	const errors = [];
+	page.on('pageerror', error => errors.push(error.message));
+	const view = (real, imag) => `F=1_E=2_P=0_H=0_A=${real}_B=${imag}_W=${fixture.radiusExact}_Z=33.25`;
+	await page.goto(`http://127.0.0.1:5173/fractal/#${view(fixture.centerRealExact, fixture.centerImagExact)}`);
+	await page.waitForFunction(() => {
+		const d = window.fractalDiagnostics;
+		return d?.mode === 'deep' && !d.pending && d.frame === d.targetFrame;
+	});
+	await page.keyboard.press('x');
+	// Return to the same depth elsewhere before a new reference exists. The frame from
+	// before the reset has no anchor, so it must not be drawn at the new location.
+	const modes = await page.evaluate(
+		async hash => {
+			location.hash = hash;
+			const seen = [];
+			for (let i = 0; i < 5; i++) {
+				await new Promise(requestAnimationFrame);
+				seen.push(window.fractalDiagnostics.mode);
+			}
+			return seen;
+		},
+		view('-0.8685', '-0.2570'),
+	);
+	expect(modes).not.toContain('deep');
+	expect(modes).toContain('placeholder');
+	await page.waitForFunction(
+		() => {
+			const d = window.fractalDiagnostics;
+			return d?.mode === 'deep' && !d.pending && d.frame === d.targetFrame;
+		},
+		undefined,
+		{ timeout: 60000 },
+	);
+	expect(errors).toEqual([]);
+});
+
 test('fast zoom and pan settles to the same view as a reload', async ({ page }, testInfo) => {
 	await page.setViewportSize({ width: 320, height: 200 });
 	const errors = [];

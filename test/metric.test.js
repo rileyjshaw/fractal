@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { GMPUtils } from '../src/gmpUtils.js';
-import { repairMetrics } from '../src/render/metric.js';
+import { isInvalidMetric, repairMetrics } from '../src/render/metric.js';
 import { sampleMandelbrot } from '../tests/helpers/oracle.js';
 import fixture from '../tests/fixtures/circular-seam.json' with { type: 'json' };
 test('invalid pixels are repaired with a direct MPFR orbit', async () => {
@@ -18,6 +18,33 @@ test('invalid pixels are repaired with a direct MPFR orbit', async () => {
 	} finally {
 		gmp.cleanup();
 	}
+});
+
+test('negative coverage and non-finite components are invalid; finite covered metrics are not', () => {
+	const pixels = new Float32Array([
+		...[3.5, 1, 4198399, 1],
+		...[0, 0, 4198399, 0],
+		...[-1, 0, 0, -1],
+		...[NaN, 1, 4198399, 1],
+		...[3.5, Infinity, 4198399, 1],
+		...[3.5, 1, 4198399, NaN],
+		...[3.5, 1, 4198399, Infinity],
+	]);
+	const invalid = [];
+	for (let offset = 0; offset < pixels.length; offset += 4) invalid.push(isInvalidMetric(pixels, offset));
+	assert.deepEqual(invalid, [false, false, true, true, true, true, true]);
+});
+
+test('repair recomputes pixels whose only fault is a non-finite component', () => {
+	const gmp = {
+		precision: 512,
+		translateCenter: () => ({ centerReal: '0', centerImag: '0' }),
+		computeReferenceData: () => ({ orbit: new Float32Array([0, 0, 0, 3, 0, 1]) }),
+	};
+	const pixels = new Float32Array([...[NaN, 0, 0, 1], ...[2, 0, 0, 1]]);
+	assert.equal(repairMetrics(gmp, pixels, { ...fixture, radiusExact: '1e-5' }, 2, 1), 1);
+	assert.ok(pixels.every(Number.isFinite));
+	assert.deepEqual(Array.from(pixels.subarray(4)), [2, 0, 0, 1]);
 });
 
 test('adaptive repair increases precision when metrics disagree and retains the full-precision fallback', () => {

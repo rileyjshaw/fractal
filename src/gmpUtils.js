@@ -5,10 +5,17 @@ import {
 	FRACTAL_TYPE_MANDALA,
 } from './domain/formulas.js';
 import { precisionForView } from './math/precision.js';
+import { DEEP_MAX_ITERATIONS } from './config.js';
+import { REFERENCE_ORBIT_RUNOFF } from './shaderCommon.js';
 import { init } from 'gmp-wasm';
 
 const DEFAULT_PRECISION = 1200;
-const ORBIT_CAPACITY = 65536 + 34; // Max render budget plus metric runoff.
+export const ORBIT_CAPACITY = DEEP_MAX_ITERATIONS + REFERENCE_ORBIT_RUNOFF;
+// Newton stops once its step is below this fraction of the search bound. A repeated
+// cycle stands in for the exact periodic point, so the point must sit far inside a pixel.
+const NEWTON_STEP_BOUND_FRACTION = 2 ** -40;
+// Relative float32 mismatch tolerated between a cycle's first sample and its return.
+const CYCLE_CLOSURE_TOLERANCE = 1e-6;
 // The deep shader's stripe runoff follows escaped pixels out to |z| > 64 (the stripe
 // bailout), so reference orbits must extend at least that far past the user's escape
 // radius rather than stopping at the old |z| > 20 threshold.
@@ -378,6 +385,27 @@ export class GMPUtils {
 		}
 	}
 
+	// Reference orbit of an exact periodic point: one high-precision period, repeated.
+	// Iterating a repelling cycle directly cannot work at finite precision. Its multiplier
+	// amplifies rounding every period until the orbit leaves the cycle and escapes.
+	// Returns null when the computed period does not close.
+	computePeriodicReferenceData(centerReal, centerImag, period, iterations, options = {}) {
+		const cycle = this.computeReferenceData(centerReal, centerImag, period + 1, options);
+		if (cycle.orbitLength <= period) return null;
+		const sample = i => {
+			const scale = Math.pow(2, cycle.orbit[i * 3 + 2]);
+			return [cycle.orbit[i * 3] * scale, cycle.orbit[i * 3 + 1] * scale];
+		};
+		const [x0, y0] = sample(0),
+			[xp, yp] = sample(period);
+		if (!(Math.hypot(xp - x0, yp - y0) <= CYCLE_CLOSURE_TOLERANCE * Math.hypot(x0, y0))) return null;
+		const orbitLength = Math.min(iterations, ORBIT_CAPACITY);
+		const orbit = new Float32Array(orbitLength * 3);
+		for (let i = 0; i < orbitLength; i++)
+			orbit.set(cycle.orbit.subarray((i % period) * 3, (i % period) * 3 + 3), i * 3);
+		return { orbit, orbitLength };
+	}
+
 	// Find a periodic point of the z² + c iteration near the requested center.
 	// Periodic points have orbit length effectively infinite (the orbit cycles without
 	// escaping), so they make ideal reference centers — grid sampling can miss tiny
@@ -399,8 +427,9 @@ export class GMPUtils {
 	// requested center and finding argmin of a near-return distance (|Z_p| for
 	// Mandelbrot, |Z_p − z_0| for Julia).
 	//
-	// Returns {centerReal, centerImag, period, residualSq} on success or null if no
-	// nearby periodic point found / Newton diverged outside maxRadius.
+	// Returns {centerReal, centerImag, period, residualSq, converged} on success or null
+	// if no nearby periodic point found / Newton diverged outside maxRadius. `converged`
+	// means the last Newton step met the step tolerance.
 	// Async so the render loop can paint while Newton iterates — at long periods
 	// a single Newton iteration can be tens of ms and the full run hundreds.
 	async findPeriodicReferenceCenter(centerReal, centerImag, maxRadius, options = {}) {
@@ -429,8 +458,9 @@ export class GMPUtils {
 			// Residual threshold for accepting Newton's converged result.
 			residualSqThreshold = 1e-20,
 			// Early-termination tolerance: stop iterating when the Newton step shrinks
-			// below this magnitude. Newton converges quadratically, so once the step is
-			// small further iterations only add noise.
+			// below this magnitude, or for Julia below NEWTON_STEP_BOUND_FRACTION of
+			// maxRadius if that is smaller. Newton converges quadratically, so once the
+			// step is small further iterations only add noise.
 			newtonStepSqTolerance = 1e-60,
 			// Yield to the browser between Newton iterations so the render loop can
 			// paint old-reference frames while we converge.
@@ -474,7 +504,9 @@ export class GMPUtils {
 		let diffX = null,
 			diffY = null,
 			distSq = null,
-			distLimit = null;
+			distLimit = null,
+			stepSq = null,
+			stepLimit = null;
 
 		try {
 			cx = this.createMPFR(centerReal);
@@ -503,8 +535,18 @@ export class GMPUtils {
 			diffY = this.createMPFR();
 			distSq = this.createMPFR();
 			distLimit = this.createMPFR();
+			stepSq = this.createMPFR();
+			stepLimit = this.createMPFR();
 
 			this.binding.mpfr_mul(distLimit, maxRadiusValue, maxRadiusValue, 0);
+			// Compared in MPFR: at deep zoom the squared step underflows a double. Only a
+			// Julia point is repeated as an exact cycle, so only Julia needs the step to
+			// shrink with the view; a Mandelbrot nucleus is iterated directly.
+			this.binding.mpfr_set_d(stepLimit, newtonStepSqTolerance, 0);
+			if (isJulia) {
+				this.binding.mpfr_mul_d(t1, distLimit, NEWTON_STEP_BOUND_FRACTION ** 2, 0);
+				if (this.binding.mpfr_cmp(t1, stepLimit) < 0) this.binding.mpfr_set(stepLimit, t1, 0);
+			}
 
 			// --- Phase 1: detect period via near-return.
 			//   Mandelbrot: Z_0 = 0,    parameter = origC, look for |Z_p| small.
@@ -569,6 +611,7 @@ export class GMPUtils {
 			// shader. For Mandelbrot orbit[0] = 0 so all candidates score 0 — but multi-period
 			// is still useful because Newton on multiples of the base period may converge
 			// where Newton on the base bounds out (more periodic points to land on).
+			// Resolves to whether the step tolerance was reached, or null on failure.
 			const runNewtonForPeriod = async period => {
 				// Reset c/z to the original requested center for a fresh Newton run.
 				this.binding.mpfr_set(cx, origCx, 0);
@@ -577,7 +620,7 @@ export class GMPUtils {
 				for (let n = 0; n < newtonIterations; n++) {
 					if (shouldYield && n > 0) {
 						await new Promise(resolve => setTimeout(resolve, 0));
-						if (isAborted()) return false;
+						if (isAborted()) return null;
 					}
 					if (isJulia) {
 						this.binding.mpfr_set(gx, cx, 0);
@@ -643,7 +686,7 @@ export class GMPUtils {
 					this.binding.mpfr_add(denom, t1, t2, 0);
 
 					// If denominator collapses, Newton breaks down at this period.
-					if (this.binding.mpfr_get_d(denom, 0) === 0) return false;
+					if (this.binding.mpfr_get_d(denom, 0) === 0) return null;
 
 					this.binding.mpfr_mul(t1, residualX, denomX, 0);
 					this.binding.mpfr_mul(t2, residualY, denomY, 0);
@@ -663,19 +706,14 @@ export class GMPUtils {
 					this.binding.mpfr_mul(t1, diffX, diffX, 0);
 					this.binding.mpfr_mul(t2, diffY, diffY, 0);
 					this.binding.mpfr_add(distSq, t1, t2, 0);
-					if (this.binding.mpfr_cmp(distSq, distLimit) > 0) return false;
+					if (this.binding.mpfr_cmp(distSq, distLimit) > 0) return null;
 
-					const dcxD = this.binding.mpfr_get_d(dcx, 0);
-					const dcyD = this.binding.mpfr_get_d(dcy, 0);
-					if (
-						Number.isFinite(dcxD) &&
-						Number.isFinite(dcyD) &&
-						dcxD * dcxD + dcyD * dcyD < newtonStepSqTolerance
-					) {
-						break;
-					}
+					this.binding.mpfr_mul(t1, dcx, dcx, 0);
+					this.binding.mpfr_mul(t2, dcy, dcy, 0);
+					this.binding.mpfr_add(stepSq, t1, t2, 0);
+					if (this.binding.mpfr_cmp(stepSq, stepLimit) < 0) return true;
 				}
-				return true;
+				return false;
 			};
 
 			// Iterate the orbit at the current (cx, cy) for `period` steps, returning
@@ -721,7 +759,6 @@ export class GMPUtils {
 			};
 
 			let bestResult = null;
-			let bestScore = -Infinity;
 
 			for (const mult of periodMultipliers) {
 				const tryPeriod = basePeriod * mult;
@@ -729,19 +766,25 @@ export class GMPUtils {
 				if (isAborted()) return bestResult;
 
 				const converged = await runNewtonForPeriod(tryPeriod);
-				if (!converged) continue;
+				if (converged === null) continue;
 
 				const { residualSq, cycleMinMagSq } = evaluateOrbitForCycle(tryPeriod);
 				if (!Number.isFinite(residualSq) || residualSq > residualSqThreshold) continue;
 
-				if (cycleMinMagSq > bestScore) {
-					bestScore = cycleMinMagSq;
+				// Only a converged point can stand in for its exact cycle, so it outranks
+				// any unconverged candidate.
+				const isBetter =
+					!bestResult ||
+					(converged && !bestResult.converged) ||
+					(converged === bestResult.converged && cycleMinMagSq > bestResult.cycleMinMagSq);
+				if (isBetter) {
 					bestResult = {
 						centerReal: this.toDecimalString(cx),
 						centerImag: this.toDecimalString(cy),
 						period: tryPeriod,
 						residualSq,
 						cycleMinMagSq,
+						converged,
 					};
 				}
 			}
@@ -775,6 +818,8 @@ export class GMPUtils {
 				diffY,
 				distSq,
 				distLimit,
+				stepSq,
+				stepLimit,
 			);
 		}
 	}

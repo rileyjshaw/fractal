@@ -33,7 +33,7 @@ function program(source) {
 }
 const manager = new DeepZoomManager();
 await manager.initialize();
-window.renderFixture = async (state, options = {}) => {
+async function ensureFixtureReference(state, referenceState, options) {
 	if (options.referenceOffset) {
 		const center = manager.translateCenter(
 			state.centerRealExact,
@@ -42,11 +42,30 @@ window.renderFixture = async (state, options = {}) => {
 			...options.referenceOffset,
 		);
 		await manager.ensureReference({
-			...state,
+			...referenceState,
 			centerRealExact: center.centerReal,
 			centerImagExact: center.centerImag,
 		});
-	} else await manager.ensureReference(state);
+	} else await manager.ensureReference(referenceState);
+}
+window.renderFixture = async (state, options = {}) => {
+	// The shader runs state.deepIterations; the reference defaults to the same length.
+	const referenceState = {
+		...state,
+		requiredIterations: state.deepIterations,
+		deepIterations: options.referenceIterations ?? state.deepIterations,
+	};
+	// Iterate a converged periodic point directly instead of repeating its cycle, to
+	// compare the two references where the iterated orbit is still on the cycle.
+	if (options.iterateCycle) {
+		manager.invalidate();
+		manager.gmp.computePeriodicReferenceData = () => null;
+	}
+	try {
+		await ensureFixtureReference(state, referenceState, options);
+	} finally {
+		delete manager.gmp.computePeriodicReferenceData;
+	}
 	const { width, height } = state;
 	canvas.width = width;
 	canvas.height = height;

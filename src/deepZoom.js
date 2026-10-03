@@ -1,10 +1,12 @@
 import {
+	FORMULAS,
 	FRACTAL_TYPE_JULIA,
 	FRACTAL_TYPE_MANDELBROT,
 	FRACTAL_TYPE_BURNING_SHIP,
 	FRACTAL_TYPE_MANDALA,
 } from './domain/formulas.js';
 import { precisionForView } from './math/precision.js';
+import { REFERENCE_ORBIT_RUNOFF } from './shaderCommon.js';
 import { GMPUtils } from './gmpUtils.js';
 import * as profiler from './profiler.js';
 import {
@@ -35,9 +37,10 @@ const CONSTANT_FRACTAL_TYPES = new Set([FRACTAL_TYPE_JULIA, FRACTAL_TYPE_MANDALA
 const MIN_SUPPORTED_EXPONENT = 2;
 const MAX_SUPPORTED_EXPONENT = 16;
 // When the requested center's reference orbit escapes before reaching this fraction
-// of u_iterations, sample nearby centers and pick one with a longer orbit. Short
-// orbits leave the perturbation shader's loop terminating at k>=orbitLength-1, so
-// every still-unescaped pixel returns interiorMetric() — the whole view goes solid.
+// of u_iterations, sample nearby centers and pick one with a longer orbit. Zero-seeded
+// formulas rebase to the reference start when it runs out, so a slightly short orbit
+// only costs a rebase. Center-seeded formulas cannot rebase: every pixel still running
+// at the end of the reference is invalid, so they need the whole budget plus runoff.
 const REFERENCE_ESCAPE_SEARCH_RATIO = 0.95;
 // Max distance (in view radii) Newton's converged periodic point may sit from the
 // requested center. Kept under DEEP_REFERENCE_RECENTER_OFFSET (main.js) so the chosen
@@ -98,6 +101,18 @@ const REFERENCE_SAMPLE_OFFSETS = [
 	[1.27, -1.27],
 	[-1.27, -1.27],
 ];
+// Farthest a chosen reference can sit from the requested center, in view radii along
+// either axis. Lets callers bound where an in-flight search can land.
+export const REFERENCE_SEARCH_RADIUS = Math.max(
+	NEWTON_MAX_OFFSET_RADII,
+	...REFERENCE_SAMPLE_OFFSETS.flat().map(Math.abs),
+);
+
+function acceptableReferenceLength(fractalType, requiredIterations, targetIterations) {
+	return FORMULAS[fractalType]?.seedsFromCenter
+		? Math.min(targetIterations, requiredIterations + REFERENCE_ORBIT_RUNOFF)
+		: Math.ceil(requiredIterations * REFERENCE_ESCAPE_SEARCH_RATIO);
+}
 
 export class DeepZoomManager {
 	constructor({ threshold = 16 } = {}) {
@@ -115,6 +130,7 @@ export class DeepZoomManager {
 		this.blaTableData = null;
 		this.visualPrefixTextureData = null;
 		this.pendingReferenceSignature = null;
+		this.pendingReferenceState = null;
 		this.pendingReferencePromise = null;
 		this.referenceRequestId = 0;
 		this.lastError = null;
@@ -177,6 +193,7 @@ export class DeepZoomManager {
 		this.blaTableData = null;
 		this.visualPrefixTextureData = null;
 		this.pendingReferenceSignature = null;
+		this.pendingReferenceState = null;
 		this.pendingReferencePromise = null;
 	}
 
@@ -329,11 +346,11 @@ export class DeepZoomManager {
 	) {
 		// Strategy A — Newton-on-period.
 		// Deterministically converge to a periodic point near the requested center.
-		// Periodic points have provably non-escaping orbits, so orbitLength always
-		// reaches targetIterations and no pixel falls through the shader's iteration
-		// cap. Works for both Mandelbrot
+		// Periodic points never escape, so their orbit can cover targetIterations and no
+		// pixel falls through the shader's iteration cap. Works for both Mandelbrot
 		// (solve f^p_c(0) = 0 in c) and Julia (solve f^p_c(z) = z in z, with c fixed
-		// at the user's parameter).
+		// at the user's parameter). The orbit is still checked: an unconverged Julia point
+		// iterated directly can escape early.
 		const newtonCenter =
 			ANALYTIC_FRACTAL_TYPES.has(options.fractalType) && options.exponent === 2
 				? await profiler.measureAsync('ref:newton.search', () =>
@@ -358,30 +375,54 @@ export class DeepZoomManager {
 					)
 				: null;
 		if (requestId !== this.referenceRequestId) return null;
+		const acceptableOrbitLength = acceptableReferenceLength(
+			options.fractalType,
+			requiredIterations,
+			targetIterations,
+		);
+		let newtonResult = null;
 		if (newtonCenter) {
 			profiler.note('ref:newton.period', newtonCenter.period);
-			const finalResult = profiler.measure('ref:newton.computeFinalOrbit', () =>
-				this.gmp.computeReferenceData(
-					newtonCenter.centerReal,
-					newtonCenter.centerImag,
-					targetIterations,
-					options,
-				),
-			);
+			const finalResult = profiler.measure('ref:newton.computeFinalOrbit', () => {
+				// A Julia periodic point is repelling: iterating it directly drifts off the
+				// cycle and escapes after a few thousand steps. Mandelbrot nuclei are
+				// superattracting, so their direct orbit stays on the cycle.
+				const cycle =
+					options.fractalType === FRACTAL_TYPE_JULIA && newtonCenter.converged
+						? this.gmp.computePeriodicReferenceData(
+								newtonCenter.centerReal,
+								newtonCenter.centerImag,
+								newtonCenter.period,
+								targetIterations,
+								options,
+							)
+						: null;
+				return (
+					cycle ??
+					this.gmp.computeReferenceData(
+						newtonCenter.centerReal,
+						newtonCenter.centerImag,
+						targetIterations,
+						options,
+					)
+				);
+			});
 			profiler.note('ref:orbitLength', finalResult.orbitLength);
-			return {
+			newtonResult = {
 				...finalResult,
 				centerRealExact: newtonCenter.centerReal,
 				centerImagExact: newtonCenter.centerImag,
 			};
+			if (finalResult.orbitLength >= acceptableOrbitLength) return newtonResult;
 		}
 
 		// Strategy B — grid sampling fallback.
-		// Two-phase: cheap sample at requiredIterations (= u_iterations the shader will
-		// actually run), then recompute selected center at full targetIterations. Used
-		// when Newton can't find a periodic point (view far from any periodic structure,
-		// period > maxPeriod, Newton diverged outside the bound, etc.).
-		const acceptableOrbitLength = Math.ceil(requiredIterations * REFERENCE_ESCAPE_SEARCH_RATIO);
+		// Two-phase: cheap sample at the acceptable length (no shorter than the
+		// u_iterations the shader will actually run), then recompute the selected center
+		// at full targetIterations. Used when Newton can't find a periodic point (view far
+		// from any periodic structure, period > maxPeriod, Newton diverged outside the
+		// bound, etc.) or its orbit is too short.
+		const sampleIterations = Math.max(requiredIterations, acceptableOrbitLength);
 
 		let bestCenterReal = centerReal;
 		let bestCenterImag = centerImag;
@@ -389,7 +430,7 @@ export class DeepZoomManager {
 
 		const trySample = (sReal, sImag) => {
 			const result = profiler.measure('ref:sample.computeOrbit', () =>
-				this.gmp.computeReferenceData(sReal, sImag, requiredIterations, options),
+				this.gmp.computeReferenceData(sReal, sImag, sampleIterations, options),
 			);
 			if (result.orbitLength > bestOrbitLength) {
 				bestCenterReal = sReal;
@@ -414,6 +455,7 @@ export class DeepZoomManager {
 		if (requestId !== this.referenceRequestId) return null;
 
 		profiler.note('ref:sample.bestOrbitLength', bestOrbitLength);
+		if (newtonResult && newtonResult.orbitLength >= bestOrbitLength) return newtonResult;
 		const finalResult = profiler.measure('ref:sample.computeFinalOrbit', () =>
 			this.gmp.computeReferenceData(bestCenterReal, bestCenterImag, targetIterations, options),
 		);
@@ -440,6 +482,7 @@ export class DeepZoomManager {
 
 		const requestId = ++this.referenceRequestId;
 		this.pendingReferenceSignature = signature;
+		this.pendingReferenceState = state;
 		this.pendingReferencePromise = Promise.resolve()
 			.then(() =>
 				this.findGoodReferenceCenter(
@@ -515,6 +558,7 @@ export class DeepZoomManager {
 			.finally(() => {
 				if (requestId === this.referenceRequestId && this.pendingReferenceSignature === signature) {
 					this.pendingReferenceSignature = null;
+					this.pendingReferenceState = null;
 					this.pendingReferencePromise = null;
 				}
 			});

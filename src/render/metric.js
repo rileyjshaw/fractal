@@ -1,7 +1,19 @@
 import { logDecimal, precisionForView } from '../math/precision.js';
-import { STRIPE_EWMA_ALPHA } from '../shaderCommon.js';
+import { REFERENCE_ORBIT_RUNOFF, STRIPE_EWMA_ALPHA, STRIPE_RUNOFF_LIMIT } from '../shaderCommon.js';
 export const METRIC_SCHEMA = 1;
 export const INVALID_METRIC = [-1, 0, 0, -1];
+// Negative coverage marks a detected numerical failure; a non-finite component is one
+// the shader missed. Both need a direct recomputation before the frame is published.
+export function isInvalidMetric(pixels, offset) {
+	const coverage = pixels[offset + 3];
+	return (
+		!(coverage >= 0) ||
+		!Number.isFinite(coverage) ||
+		!Number.isFinite(pixels[offset]) ||
+		!Number.isFinite(pixels[offset + 1]) ||
+		!Number.isFinite(pixels[offset + 2])
+	);
+}
 const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
 const smoothstep = (a, b, x) => {
 	const t = clamp((x - a) / (b - a), 0, 1);
@@ -10,6 +22,8 @@ const smoothstep = (a, b, x) => {
 const pack = (brightness, normal = -1) =>
 	Math.floor(clamp(brightness, 0, 3.999) * 1024 + 0.5) * 4096 +
 	(normal < 0 ? 4095 : Math.floor((normal / (2 * Math.PI)) * 4094 + 0.5));
+// Unshaded interior: the display paints it with the plain inside colour.
+export const FLAT_INTERIOR_METRIC = Object.freeze([0, 0, pack(1), 0]);
 // CPU fallback metrics from an independently computed MPFR pixel orbit. Orbit
 // values are rounded only after high-precision iteration; no reference deltas.
 export function metricFromOrbit(orbit, state) {
@@ -59,7 +73,7 @@ export function metricFromOrbit(orbit, state) {
 			} else brightness = 1 + (0.82 + (0.34 * detail) / i - 1) * smoothstep(3, 24, i);
 			escape = { smooth, normal, brightness, iteration: i };
 		}
-		if (escape && (mag > 64 || i - escape.iteration >= 32 || i === orbit.length / 3 - 1)) {
+		if (escape && (mag > 64 || i - escape.iteration >= STRIPE_RUNOFF_LIMIT || i === orbit.length / 3 - 1)) {
 			const frac = 1 + Math.log2(Math.log(64 * 64) / Math.max(Math.log(mag * mag), 1e-6));
 			const stripeOffset =
 				(mag * mag <= 1.000001 ? stripe : previous + (stripe - previous) * clamp(frac, 0, 1)) * 32;
@@ -75,7 +89,7 @@ export function metricFromOrbit(orbit, state) {
 export function repairMetrics(gmp, pixels, state, width, height, onRepair, { adaptive = false, pixelIndices } = {}) {
 	let repaired = 0;
 	for (let index = 0; index < pixels.length; index += 4) {
-		if (pixels[index + 3] >= 0 && pixels.subarray(index, index + 4).every(Number.isFinite)) continue;
+		if (!isInvalidMetric(pixels, index)) continue;
 		const pixel = pixelIndices ? pixelIndices[index / 4] : index / 4,
 			x = pixel % width,
 			y = Math.floor(pixel / width),
@@ -91,7 +105,7 @@ export function repairMetrics(gmp, pixels, state, width, height, onRepair, { ada
 			const { orbit } = gmp.computeReferenceData(
 				center.centerReal,
 				center.centerImag,
-				state.deepIterations + 34,
+				state.deepIterations + REFERENCE_ORBIT_RUNOFF,
 				{ ...state, precisionBits },
 			);
 			return new Float32Array(metricFromOrbit(orbit, state));
