@@ -31,3 +31,4 @@
 - [x] 5.4 `npm run check` passes
 - [x] 5.5 `env CI=1 npm run test:gpu` on the host. Replace the absolute MPFR smooth bound in the Julia fixture with exact agreement with the directly iterated orbit: one float32-sensitive pixel is 0.119 off with either reference.
 - [x] 5.6 Commit the fixes once all four checks pass
+- [x] 5.7 Make the zoom timing tests independent of host load: bound repair relative to the render it follows, and mark the 40-step test slow

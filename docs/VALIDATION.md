@@ -19,7 +19,7 @@ Run `npm run check` and `npm run test:gpu` to reproduce the checks. Install the 
 
 ## Rapid Julia navigation
 
-The zoom regression uses center `-0.50267735688078976448664 - 0.213776001900282709822774i`, Julia constant `-0.71 - 0.43i`, and zoom 60. Before progressive publication, zooming to 60.5 at 960×600 left the entire previous frame magnified by √2 for more than 15 seconds while 3813 invalid pixels were repaired. The new test requires a completed frame within five seconds. Frames stay coherent during repair; no unresolved pixels or borrowed metrics are published. Sparse parallel repair and precision-doubling checks avoid publishing partial frames. Adaptive repair is compared with the original full-precision calculation, including the deeper zoom-83.75 gap fixture supplied during testing. The dense Julia comparison validates repaired pixels; the original perturbation pixels can still differ near sensitive boundaries.
+The zoom regression uses center `-0.50267735688078976448664 - 0.213776001900282709822774i`, Julia constant `-0.71 - 0.43i`, and zoom 60. Before progressive publication, zooming to 60.5 at 960×600 left the entire previous frame magnified by √2 for more than 15 seconds while 3813 invalid pixels were repaired. The new test requires a completed, repaired frame within three times the longest frame of the wait (the render and its readback) plus three seconds; see "GPU timing on shared hosts". Frames stay coherent during repair; no unresolved pixels or borrowed metrics are published. Sparse parallel repair and precision-doubling checks avoid publishing partial frames. Adaptive repair is compared with the original full-precision calculation, including the deeper zoom-83.75 gap fixture supplied during testing. The dense Julia comparison validates repaired pixels; the original perturbation pixels can still differ near sensitive boundaries.
 
 A second regression interleaves 200 wheel events with clicks across ten zoom levels, waits for the final view to finish, and compares it with a fresh load of its saved URL. Worker unit tests verify that superseded jobs cannot publish late progress updates. These checks run in Chromium; physical-GPU and Firefox checks remain useful.
 
@@ -61,4 +61,15 @@ Where Newton does converge, the found cycle is now repeated. For Julia sets with
 
 ## GPU timing on shared hosts
 
-`zoom.spec.js` "Julia repair presents a complete frame without a long preview" must settle within 5 s at 960×600 in software WebGL. On one host, the settle frame (render plus readback) took 2.5–2.7 s and repair about 1 s when the machine was quiet. Under load it took 4.4–5.6 s plus about 2 s. With unchanged test code, HEAD (`5429cac`) failed it in all four attempts in one loaded run and settled in 3.9–4.3 s in a quiet run. This change settled in 6.3–6.6 s loaded and 3.6–3.7 s quiet. The 40-step "zoom settles" test is similarly load-sensitive.
+Software WebGL timing varies severalfold with host load, so the zoom tests avoid fixed short budgets.
+
+`zoom.spec.js` "Julia repair presents a complete frame without a long preview" originally required the view to settle within 5 s at 960×600. Measurements on one host:
+
+| Host state | Settle frame (render + readback) | Repair | Total, `5429cac` | Total, this change |
+| --- | --- | --- | --- | --- |
+| Quiet | 2.5–2.7 s | about 1 s | 3.9–4.3 s | 3.6–3.7 s |
+| Loaded | 4.4–5.6 s | about 2 s | 6.9–8.0 s | 6.3–6.6 s |
+
+With the 5 s budget, `5429cac` failed in all four attempts in one loaded run, and this change failed in one of three full suite runs. The test now measures the longest frame while waiting, which is the render of the new view, and requires the repaired frame within three times that plus 3 s. Repair that dominates the render, as it did before sparse parallel repair (more than 15 s after a render of a few seconds), still fails.
+
+The 40-step "zoom settles" test keeps its 15 s limit per step. It is marked slow because the steps together passed the default 120 s test timeout on a loaded host.

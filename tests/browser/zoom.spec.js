@@ -3,6 +3,9 @@ import { GMPUtils } from '../../src/gmpUtils.js';
 import fixture from '../fixtures/circular-seam.json' with { type: 'json' };
 
 test('zoom settles to a current full-resolution frame', async ({ page }) => {
+	// Forty software-rendered settles: each still has to finish within 15 s, but on a
+	// loaded host their sum can pass the default test timeout.
+	test.slow();
 	const errors = [];
 	page.on('pageerror', error => errors.push(error.message));
 	await page.setViewportSize({ width: 640, height: 400 });
@@ -44,41 +47,37 @@ test('Julia repair presents a complete frame without a long preview', async ({ p
 		'http://127.0.0.1:5173/fractal/#F=0_E=2_P=0_H=0_A=-0.50267735688078976448664_B=-0.213776001900282709822774_W=1.7347234759783363e-18_Z=59.99999999999873',
 	);
 	await page.waitForFunction(() => window.fractalDiagnostics?.mode === 'deep' && !window.fractalDiagnostics.pending);
-	const previous = await page.evaluate(() => window.fractalDiagnostics.frame);
-	await page
+	// Software WebGL speed varies severalfold with host load, so the bound is relative.
+	// The longest frame while waiting is the render of the new view plus its readback;
+	// repair may not take much longer than that. Before sparse parallel repair, this
+	// view spent more than 15 s repairing after a render of a few seconds.
+	const timing = await page
 		.locator('canvas')
 		.first()
-		.evaluate(canvas => {
+		.evaluate(async canvas => {
+			const initial = window.fractalDiagnostics.frame;
+			const start = performance.now();
 			for (let j = 0; j < 10; j++) canvas.dispatchEvent(new WheelEvent('wheel', { deltaY: -1 }));
+			let last = start,
+				longestFrameMs = 0;
+			while (performance.now() - start < 60000) {
+				await new Promise(requestAnimationFrame);
+				const now = performance.now();
+				longestFrameMs = Math.max(longestFrameMs, now - last);
+				last = now;
+				const d = window.fractalDiagnostics;
+				if (!d.moving && !d.pending && d.frame === d.targetFrame && d.frame !== initial)
+					return { settledMs: now - start, longestFrameMs, repairedPixels: d.repairedPixels };
+			}
+			return { settledMs: null, longestFrameMs };
 		});
-	await page.waitForFunction(previous => window.fractalDiagnostics.targetFrame !== previous, previous);
-	await expect
-		.poll(
-			() =>
-				page.evaluate(() => {
-					const d = window.fractalDiagnostics;
-					return !d.moving && !d.pending && d.frame === d.targetFrame;
-				}),
-			{ timeout: 5000 },
-		)
-		.toBe(true);
-	await expect
-		.poll(() => page.evaluate(() => window.fractalDiagnostics.repairedPixels), { timeout: 5000 })
-		.toBeGreaterThan(0);
 	await testInfo.attach('progress.json', {
-		body: JSON.stringify(await page.evaluate(() => window.fractalDiagnostics)),
+		body: JSON.stringify({ timing, diagnostics: await page.evaluate(() => window.fractalDiagnostics) }),
 		contentType: 'application/json',
 	});
-	await expect
-		.poll(
-			() =>
-				page.evaluate(() => {
-					const d = window.fractalDiagnostics;
-					return !d.pending && d.frame === d.targetFrame;
-				}),
-			{ timeout: 60000 },
-		)
-		.toBe(true);
+	expect(timing.settledMs).not.toBeNull();
+	expect(timing.repairedPixels).toBeGreaterThan(0);
+	expect(timing.settledMs).toBeLessThan(3 * timing.longestFrameMs + 3000);
 });
 
 test('a continuous wheel burst completes its jobs and presents frames before input stops', async ({
