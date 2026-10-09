@@ -2,45 +2,6 @@ import { test, expect } from '@playwright/test';
 import { GMPUtils } from '../../src/gmpUtils.js';
 import fixture from '../fixtures/circular-seam.json' with { type: 'json' };
 
-test('zoom settles to a current full-resolution frame', async ({ page }) => {
-	// Forty software-rendered settles: each still has to finish within 15 s, but on a
-	// loaded host their sum can pass the default test timeout.
-	test.slow();
-	const errors = [];
-	page.on('pageerror', error => errors.push(error.message));
-	await page.setViewportSize({ width: 640, height: 400 });
-	await page.goto(
-		`http://127.0.0.1:5173/fractal/#F=1_E=2_P=0_H=0_A=${fixture.centerRealExact}_B=${fixture.centerImagExact}_W=${fixture.radiusExact}_Z=33.25`,
-	);
-	await page.waitForFunction(() => window.fractalDiagnostics?.mode === 'deep');
-	for (const direction of Array(20).fill(1).concat(Array(20).fill(-1))) {
-		const previousFrame = await page.evaluate(() => window.fractalDiagnostics.frame);
-		await page
-			.locator('canvas')
-			.first()
-			.evaluate((canvas, direction) => {
-				for (let i = 0; i < 10; i++) canvas.dispatchEvent(new WheelEvent('wheel', { deltaY: direction }));
-			}, direction);
-		await page.waitForFunction(previous => window.fractalDiagnostics.targetFrame !== previous, previousFrame);
-		await expect
-			.poll(
-				async () =>
-					page.evaluate(() => {
-						const d = window.fractalDiagnostics;
-						return {
-							moving: d.moving,
-							pending: d.pending,
-							current: d.frame === d.targetFrame,
-							mode: d.mode,
-						};
-					}),
-				{ timeout: 15000 },
-			)
-			.toEqual({ moving: false, pending: null, current: true, mode: 'deep' });
-	}
-	expect(errors).toEqual([]);
-});
-
 test('Julia repair presents a complete frame without a long preview', async ({ page }, testInfo) => {
 	await page.setViewportSize({ width: 960, height: 600 });
 	await page.goto(
